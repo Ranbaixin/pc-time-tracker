@@ -88,7 +88,7 @@ def cmd_serve(args):
         version="1.0.0",
         docs_url="/docs" if config.server.enable_swagger else None,
     )
-    app.add_middleware(CORSMiddleware, allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
+    app.add_middleware(CORSMiddleware, allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?$",
                        allow_credentials=True, allow_methods=["GET", "POST", "PUT"], allow_headers=["Content-Type"])
     app.include_router(sessions.router, prefix="/api/v1")
     app.include_router(activity.router, prefix="/api/v1")
