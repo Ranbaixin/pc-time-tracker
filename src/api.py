@@ -82,13 +82,13 @@ def create_app() -> FastAPI:
         redoc_url=None,
     )
 
-    # CORS — allow localhost access
+    # CORS — restrict to localhost only (no wildcard origins)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:*", "http://127.0.0.1:*", "*"],
+        allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PUT"],
+        allow_headers=["Content-Type"],
     )
 
     # Register routes

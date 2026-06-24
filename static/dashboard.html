@@ -147,15 +147,20 @@ const API = '/api/v1';
 
 // ---- Helpers ----
 function fmtDuration(seconds) {
-  if (!seconds || seconds <= 0) return '0 分钟';
+  if (!seconds || seconds <= 0) return '0 fen';
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
-  if (h > 0) return `${h} 小时 ${m} 分钟`;
-  return `${m} 分钟`;
+  if (h > 0) return h + ' h ' + m + ' min';
+  return m + ' min';
 }
 function fmtTime(iso) {
   if (!iso) return '--';
   return iso.split(' ')[1] || iso;
+}
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
 }
 function updateClock() {
   document.getElementById('clock').textContent = new Date().toLocaleTimeString('zh-CN');
@@ -283,12 +288,12 @@ async function loadRecent() {
       const title = (a.window_title || '').length > 40
         ? (a.window_title || '').slice(0,40) + '...' : (a.window_title || '');
       const dur = a.duration_seconds ? fmtDuration(a.duration_seconds) : '进行中';
-      html += `<tr>
-        <td>${time}</td>
-        <td class="process">${a.process_name.replace('.exe','')}</td>
-        <td>${title || '(无标题)'}</td>
-        <td>${dur}</td>
-      </tr>`;
+      html += '<tr>' +
+        '<td>' + escapeHtml(time) + '</td>' +
+        '<td class="process">' + escapeHtml(a.process_name.replace('.exe','')) + '</td>' +
+        '<td>' + escapeHtml(title) + '</td>' +
+        '<td>' + escapeHtml(dur) + '</td>' +
+        '</tr>';
     }
     html += '</tbody></table>';
     document.getElementById('recent-table').innerHTML = html;
