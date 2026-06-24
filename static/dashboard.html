@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PC Time Tracker</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+:root {
+  --bg: #f5f5f5;
+  --card-bg: #ffffff;
+  --text: #1a1a1a;
+  --text-secondary: #666;
+  --border: #e0e0e0;
+  --accent: #4f46e5;
+  --accent-light: #eef2ff;
+  --success: #16a34a;
+  --warning: #f59e0b;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f172a;
+    --card-bg: #1e293b;
+    --text: #e2e8f0;
+    --text-secondary: #94a3b8;
+    --border: #334155;
+    --accent: #818cf8;
+    --accent-light: #1e1b4b;
+    --success: #22c55e;
+    --warning: #fbbf24;
+  }
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+.header { background: var(--card-bg); border-bottom: 1px solid var(--border); padding: 12px 24px; display: flex; justify-content: space-between; align-items: center; }
+.header h1 { font-size: 1.2rem; font-weight: 600; }
+.header .status { font-size: 0.8rem; color: var(--text-secondary); }
+.header .status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+.header .status .dot.on { background: var(--success); }
+.header .status .dot.off { background: #ef4444; }
+.container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 10px; padding: 18px; }
+.card .label { font-size: 0.8rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+.card .value { font-size: 1.5rem; font-weight: 700; }
+.card .sub { font-size: 0.8rem; color: var(--text-secondary); margin-top: 4px; }
+.charts { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+@media (max-width: 768px) { .charts { grid-template-columns: 1fr; } }
+.chart-box { background: var(--card-bg); border: 1px solid var(--border); border-radius: 10px; padding: 18px; }
+.chart-box h3 { font-size: 0.9rem; margin-bottom: 12px; color: var(--text-secondary); }
+.chart-box canvas { max-height: 280px; }
+.timeline-box { background: var(--card-bg); border: 1px solid var(--border); border-radius: 10px; padding: 18px; margin-bottom: 24px; }
+.timeline-box h3 { font-size: 0.9rem; margin-bottom: 12px; color: var(--text-secondary); }
+.recent-box { background: var(--card-bg); border: 1px solid var(--border); border-radius: 10px; padding: 18px; }
+.recent-box h3 { font-size: 0.9rem; margin-bottom: 12px; color: var(--text-secondary); }
+table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+th { text-align: left; padding: 8px 12px; border-bottom: 2px solid var(--border); color: var(--text-secondary); font-weight: 600; }
+td { padding: 6px 12px; border-bottom: 1px solid var(--border); color: var(--text-secondary); }
+td.process { color: var(--text); font-weight: 500; }
+.error { background: #fef2f2; color: #dc2626; padding: 16px; border-radius: 8px; text-align: center; }
+.loading { text-align: center; padding: 40px; color: var(--text-secondary); }
+.empty { text-align: center; padding: 40px; color: var(--text-secondary); font-style: italic; }
+
+/* Toggle switch */
+.toggle-group { display: flex; align-items: center; gap: 8px; }
+.toggle-label { font-size: 0.8rem; color: var(--text-secondary); }
+.toggle-switch { position: relative; width: 40px; height: 22px; display: inline-block; }
+.toggle-switch input { opacity: 0; width: 0; height: 0; }
+.toggle-slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background: #64748b; border-radius: 22px; transition: 0.2s; }
+.toggle-slider::before { content: ''; position: absolute; height: 16px; width: 16px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: 0.2s; }
+.toggle-switch input:checked + .toggle-slider { background: var(--accent); }
+.toggle-switch input:checked + .toggle-slider::before { transform: translateX(18px); }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>📊 PC Time Tracker</h1>
+  <div class="status">
+    <div class="toggle-group">
+      <span class="toggle-label">开机自启</span>
+      <label class="toggle-switch">
+        <input type="checkbox" id="autostart-toggle" onchange="toggleAutostart()">
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+    <span style="margin-left:16px"><span id="status-dot" class="dot on"></span>
+    <span id="status-text">运行中</span> ·</span>
+    <span id="clock">--</span>
+  </div>
+</div>
+
+<div class="container">
+
+  <!-- Summary Cards -->
+  <div class="cards">
+    <div class="card">
+      <div class="label">今日活跃时间</div>
+      <div class="value" id="today-active">--</div>
+      <div class="sub" id="today-idle"></div>
+    </div>
+    <div class="card">
+      <div class="label">当前会话</div>
+      <div class="value" id="session-elapsed">--</div>
+      <div class="sub" id="session-window"></div>
+    </div>
+    <div class="card">
+      <div class="label">今日 Top 应用</div>
+      <div class="value" id="top-app">--</div>
+      <div class="sub" id="top-app-time"></div>
+    </div>
+    <div class="card">
+      <div class="label">追踪模式</div>
+      <div class="value" id="tracking-mode">--</div>
+      <div class="sub" id="tracker-status"></div>
+    </div>
+  </div>
+
+  <!-- Charts -->
+  <div class="charts">
+    <div class="chart-box">
+      <h3>最近 7 天使用趋势</h3>
+      <canvas id="chart-weekly"></canvas>
+    </div>
+    <div class="chart-box">
+      <h3>今日应用占比</h3>
+      <canvas id="chart-pie"></canvas>
+    </div>
+  </div>
+
+  <!-- Hourly Timeline -->
+  <div class="timeline-box">
+    <h3>今日每小时活跃度</h3>
+    <canvas id="chart-timeline" style="max-height:200px;"></canvas>
+  </div>
+
+  <!-- Recent Activity -->
+  <div class="recent-box">
+    <h3>最近活动</h3>
+    <div id="recent-table"></div>
+  </div>
+
+</div>
+
+<script>
+const API = '/api/v1';
+
+// ---- Helpers ----
+function fmtDuration(seconds) {
+  if (!seconds || seconds <= 0) return '0 分钟';
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (h > 0) return `${h} 小时 ${m} 分钟`;
+  return `${m} 分钟`;
+}
+function fmtTime(iso) {
+  if (!iso) return '--';
+  return iso.split(' ')[1] || iso;
+}
+function updateClock() {
+  document.getElementById('clock').textContent = new Date().toLocaleTimeString('zh-CN');
+}
+
+// ---- Chart instances ----
+let weeklyChart, pieChart, timelineChart;
+
+function initCharts() {
+  const fontColor = getComputedStyle(document.body).getPropertyValue('--text-secondary').trim();
+  const gridColor = getComputedStyle(document.body).getPropertyValue('--border').trim();
+
+  weeklyChart = new Chart(document.getElementById('chart-weekly'), {
+    type: 'bar',
+    data: { labels: [], datasets: [{ label: '活跃时间 (小时)', data: [], backgroundColor: '#818cf8', borderRadius: 4 }] },
+    options: { responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: { x: { ticks: { color: fontColor } }, y: { ticks: { color: fontColor, callback: v => v + 'h' }, grid: { color: gridColor } } }
+    }
+  });
+
+  pieChart = new Chart(document.getElementById('chart-pie'), {
+    type: 'doughnut',
+    data: { labels: [], datasets: [{ data: [], backgroundColor: ['#818cf8','#22c55e','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#f97316','#84cc16','#ec4899','#14b8a6'] }] },
+    options: { responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { position: 'right', labels: { color: fontColor, padding: 12, font: { size: 11 } } } }
+    }
+  });
+
+  timelineChart = new Chart(document.getElementById('chart-timeline'), {
+    type: 'bar',
+    data: { labels: Array.from({length:24},(_,i)=>i+'时'), datasets: [{ label: '分钟', data: Array(24).fill(0), backgroundColor: '#a5b4fc', borderRadius: 2 }] },
+    options: { responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: { x: { ticks: { color: fontColor, maxTicksLimit: 12 } }, y: { ticks: { color: fontColor, callback: v => Math.round(v/60)+'h' }, grid: { color: gridColor } } }
+    }
+  });
+}
+
+// ---- Data loading ----
+async function loadSummary() {
+  try {
+    const res = await fetch(`${API}/stats/summary?date=today`);
+    const json = await res.json();
+    const d = json.data;
+    if (!d) return;
+
+    document.getElementById('today-active').textContent = fmtDuration(d.total_seconds);
+    document.getElementById('today-idle').textContent = d.idle_seconds > 0 ? `空闲 ${fmtDuration(d.idle_seconds)}` : '';
+
+    if (d.top_processes && d.top_processes.length > 0) {
+      const top = d.top_processes[0];
+      document.getElementById('top-app').textContent = top.process_name.replace('.exe','');
+      document.getElementById('top-app-time').textContent = fmtDuration(top.total_seconds);
+    }
+
+    // Update pie chart
+    const labels = d.top_processes?.map(p => p.process_name.replace('.exe','')) || [];
+    const data = d.top_processes?.map(p => p.total_seconds) || [];
+    pieChart.data.labels = labels;
+    pieChart.data.datasets[0].data = data;
+    pieChart.update();
+  } catch(e) { console.error('summary', e); }
+}
+
+async function loadDaily() {
+  try {
+    const res = await fetch(`${API}/stats/daily?days=7`);
+    const json = await res.json();
+    const daily = json.data?.daily || [];
+
+    const labels = daily.map(d => d.date.slice(5)); // MM-DD
+    const data = daily.map(d => Math.round(d.total_seconds / 3600 * 10) / 10);
+
+    weeklyChart.data.labels = labels;
+    weeklyChart.data.datasets[0].data = data;
+    weeklyChart.update();
+  } catch(e) { console.error('daily', e); }
+}
+
+async function loadTimeline() {
+  try {
+    const res = await fetch(`${API}/stats/timeline?date=today`);
+    const json = await res.json();
+    const timeline = json.data?.timeline || [];
+
+    timelineChart.data.datasets[0].data = timeline.map(t => t.active_seconds);
+    timelineChart.update();
+  } catch(e) { console.error('timeline', e); }
+}
+
+async function loadCurrentSession() {
+  try {
+    const res = await fetch(`${API}/sessions/current`);
+    const json = await res.json();
+    const d = json.data;
+    if (!d) return;
+
+    document.getElementById('session-elapsed').textContent = fmtDuration(d.elapsed_seconds);
+    if (d.active_window) {
+      const p = d.active_window.process_name.replace('.exe','');
+      const t = d.active_window.window_title.length > 35
+        ? d.active_window.window_title.slice(0, 35) + '...' : d.active_window.window_title;
+      document.getElementById('session-window').textContent = `${p} — ${t || '(无标题)'}`;
+    } else {
+      document.getElementById('session-window').textContent = '空闲中...';
+    }
+  } catch(e) { console.error('session', e); }
+}
+
+async function loadRecent() {
+  try {
+    const res = await fetch(`${API}/activity/recent?limit=15`);
+    const json = await res.json();
+    const activities = json.data?.activities || [];
+
+    if (activities.length === 0) {
+      document.getElementById('recent-table').innerHTML = '<div class="empty">暂无活动记录，开始使用电脑后数据会出现在这里。</div>';
+      return;
+    }
+
+    let html = `<table><thead><tr><th>时间</th><th>进程</th><th>窗口标题</th><th>持续</th></tr></thead><tbody>`;
+    for (const a of activities) {
+      const time = fmtTime(a.start_time);
+      const title = (a.window_title || '').length > 40
+        ? (a.window_title || '').slice(0,40) + '...' : (a.window_title || '');
+      const dur = a.duration_seconds ? fmtDuration(a.duration_seconds) : '进行中';
+      html += `<tr>
+        <td>${time}</td>
+        <td class="process">${a.process_name.replace('.exe','')}</td>
+        <td>${title || '(无标题)'}</td>
+        <td>${dur}</td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+    document.getElementById('recent-table').innerHTML = html;
+  } catch(e) { console.error('recent', e); }
+}
+
+async function loadStatus() {
+  try {
+    const res = await fetch(`${API}/status`);
+    const json = await res.json();
+    const d = json.data || {};
+
+    const dot = document.getElementById('status-dot');
+    const txt = document.getElementById('status-text');
+    if (d.tracker_running) {
+      dot.className = 'dot on'; txt.textContent = '运行中';
+    } else {
+      dot.className = 'dot off'; txt.textContent = '追踪已停止';
+    }
+
+    document.getElementById('tracking-mode').textContent =
+      d.current_process ? d.current_process.replace('.exe','') : '等待中...';
+    document.getElementById('tracker-status').textContent =
+      d.is_idle ? '空闲中' : `轮询 ${d.total_polls || 0} 次`;
+  } catch(e) { /* status is optional */ }
+}
+
+// --- Autostart toggle ---
+async function loadAutostart() {
+  try {
+    const res = await fetch(`${API}/autostart`);
+    const json = await res.json();
+    document.getElementById('autostart-toggle').checked = json.data?.enabled || false;
+  } catch(e) { console.error('autostart', e); }
+}
+
+async function toggleAutostart() {
+  const enabled = document.getElementById('autostart-toggle').checked;
+  try {
+    const res = await fetch(`${API}/autostart`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enabled})
+    });
+    const json = await res.json();
+    // Refresh to show actual state
+    setTimeout(loadAutostart, 500);
+  } catch(e) {
+    console.error('toggle autostart', e);
+    // Revert on error
+    document.getElementById('autostart-toggle').checked = !enabled;
+  }
+}
+
+// ---- Initialize ----
+function init() {
+  initCharts();
+  loadSummary();
+  loadDaily();
+  loadTimeline();
+  loadCurrentSession();
+  loadRecent();
+  loadStatus();
+  loadAutostart();
+
+  // Live updates
+  setInterval(() => { updateClock(); loadCurrentSession(); loadStatus(); }, 5000);
+  setInterval(() => { loadSummary(); loadDaily(); loadTimeline(); loadRecent(); }, 60000);
+  updateClock();
+}
+
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>

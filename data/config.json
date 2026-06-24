@@ -1,0 +1,25 @@
+{
+  "tracker": {
+    "tracking_mode": "foreground",
+    "poll_interval_seconds": 5.0,
+    "idle_detection_enabled": true,
+    "idle_threshold_seconds": 600,
+    "sleep_gap_threshold_multiplier": 3.0,
+    "ignore_windows_with_empty_title": true
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8088,
+    "enable_dashboard": true,
+    "enable_swagger": true
+  },
+  "database": {
+    "path": "data/tracker.db"
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "logs/tracker.log",
+    "max_size_mb": 10,
+    "backup_count": 3
+  }
+}
