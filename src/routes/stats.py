@@ -195,47 +195,78 @@ def get_top_processes(
 def get_timeline(
     date: str = Query(default="today"),
 ):
-    """Get hourly breakdown (24-element array) for a date."""
+    """Get hourly breakdown (24-element array) for a date.
+
+    Activities spanning multiple hours are proportionally distributed
+    so each hour maxes out at 3600 seconds (60 min).
+    """
     date = _resolve_date(date)
     db = get_db()
 
     with db.connect() as conn:
-        # Raw hourly aggregation
+        # Fetch all non-sleep activities for the day
         rows = conn.execute(
-            """SELECT CAST(strftime('%H', start_time) AS INTEGER) as hour,
-                      COALESCE(SUM(duration_seconds), 0) as active_seconds
+            """SELECT start_time, end_time, duration_seconds, process_name
                FROM window_activity
                WHERE date(start_time) = ?
                  AND process_name != '[System Sleep]'
-                 AND duration_seconds IS NOT NULL
-               GROUP BY hour
-               ORDER BY hour""",
+                 AND duration_seconds IS NOT NULL AND duration_seconds > 0""",
             (date,),
         ).fetchall()
 
-    hour_map = {r["hour"]: int(r["active_seconds"]) for r in rows}
+    # Initialize 24-hour buckets
+    hours = [{"hour": h, "active_seconds": 0, "process_times": {}} for h in range(24)]
 
+    for r in rows:
+        d = dict(r)
+        dur = int(d["duration_seconds"])
+        start_str = d["start_time"]
+        end_str = d.get("end_time") or start_str
+        proc = d["process_name"]
+
+        # Parse start and end times
+        try:
+            st = datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S")
+            et = datetime.strptime(end_str, "%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            # If parsing fails, attribute to start hour
+            h = int(start_str[11:13]) if len(start_str) >= 13 else 0
+            hours[h]["active_seconds"] += dur
+            hours[h]["process_times"][proc] = hours[h]["process_times"].get(proc, 0) + dur
+            continue
+
+        # Distribute duration across hours proportionally
+        remaining = dur
+        current = st
+        while remaining > 0 and current < et:
+            h = current.hour
+            # End of this hour bucket
+            next_hour = current.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+            # How much of the remaining duration falls in this hour
+            until_end_of_hour = (next_hour - current).total_seconds()
+            # How much of the activity is left
+            activity_left = (et - current).total_seconds()
+            # Take the smaller of: remaining dur, until end of hour, activity left
+            segment = min(remaining, until_end_of_hour, activity_left)
+            segment = max(0, int(segment))
+
+            if segment > 0:
+                hours[h]["active_seconds"] += segment
+                hours[h]["process_times"][proc] = hours[h]["process_times"].get(proc, 0) + segment
+                remaining -= segment
+
+            current = next_hour
+
+    # Cap each hour at 3600
     timeline = []
-    for h in range(24):
-        seconds = hour_map.get(h, 0)
-
-        # Get top process for this hour
-        top = conn.execute(
-            """SELECT process_name, SUM(duration_seconds) as s
-               FROM window_activity
-               WHERE date(start_time) = ?
-                 AND CAST(strftime('%H', start_time) AS INTEGER) = ?
-                 AND process_name NOT IN ('[System Sleep]', '<exited>')
-                 AND duration_seconds IS NOT NULL
-               GROUP BY process_name
-               ORDER BY s DESC LIMIT 1""",
-            (date, h),
-        ).fetchone()
-
+    for h in hours:
+        sec = min(h["active_seconds"], 3600)
+        proc_times = h["process_times"]
+        top_proc = max(proc_times, key=proc_times.get) if proc_times else None
         timeline.append({
-            "hour": h,
-            "active_seconds": seconds,
-            "top_process": top["process_name"] if top else None,
+            "hour": h["hour"],
+            "active_seconds": sec,
+            "top_process": top_proc,
         })
 
     return {"data": {"date": date, "timeline": timeline}}
