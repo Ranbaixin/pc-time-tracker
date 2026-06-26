@@ -219,21 +219,33 @@ class ActivityClassifier:
     # ── Internal helpers ──────────────────────────────────────────────────
 
     def _extract_site(self, title: str) -> str:
-        """Match known sites from window title using 'in' (Chinese-safe)."""
+        """Match known sites from window title using 'in' (Chinese-safe).
+        Exclude browser name suffixes (Google Chrome, Microsoft Edge, Firefox) to avoid false positives.
+        """
+        # Strip browser suffixes first
+        clean = title
+        for suffix in (" - Google Chrome", " - Microsoft Edge", " — Mozilla Firefox",
+                       " - Chromium", " - Brave", " - Opera", " - Vivaldi"):
+            if suffix in clean:
+                clean = clean[:clean.rfind(suffix)]
+                break
+
         # Check custom rules first
+        clean_lower = clean.lower()
         for pattern, name in self._custom_sites.items():
-            if pattern in title:
+            if pattern.lower() in clean_lower:
                 return name
         for keyword, name in self.KNOWN_SITES:
-            if keyword in title:
+            if keyword.lower() in clean_lower:
                 return name
         return ""
 
     def _infer_content_type(self, site: str, title: str) -> str:
-        """Infer content type from site + title keywords."""
+        """Infer content type from site + title keywords (case-insensitive)."""
+        title_lower = title.lower()
         for site_matches, keywords, ctype in self.CONTENT_RULES:
             if site in site_matches:
-                if not keywords or any(kw in title for kw in keywords):
+                if not keywords or any(kw.lower() in title_lower for kw in keywords):
                     return ctype
         # Fallback: title keyword heuristics
         for kw, ctype in [
@@ -242,7 +254,7 @@ class ActivityClassifier:
             ("会议", "会议"), ("Dashboard", "仪表盘"),
             ("Settings", "设置"), ("配置", "配置"),
         ]:
-            if kw in title:
+            if kw.lower() in title_lower:
                 return ctype
         return ""
 
