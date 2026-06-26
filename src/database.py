@@ -1,10 +1,27 @@
 """Database layer — SQLite connection, schema, migrations."""
 
+import logging
 import sqlite3
 import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+
+def safe_add_column(conn: sqlite3.Connection, table: str, column: str, col_type: str):
+    """Add column only if it doesn't exist (SQLite has no IF NOT EXISTS for ALTER).
+
+    Uses PRAGMA table_info() to check first; try/except as race-condition guard.
+    """
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in existing:
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+            logger.debug(f"Migration: added {table}.{column} {col_type}")
+        except sqlite3.OperationalError:
+            pass  # Race condition — another thread added it first
 
 
 SCHEMA_SQL = """
@@ -74,9 +91,57 @@ class Database:
             raise
 
     def init_schema(self):
-        """Create tables and indexes if they don't exist."""
+        """Create tables and indexes if they don't exist; apply migrations."""
         with self.connect() as conn:
             conn.executescript(SCHEMA_SQL)
+            self._migrate(conn)
+
+    def _migrate(self, conn: sqlite3.Connection):
+        """Apply column and table migrations safely (no IF NOT EXISTS in SQLite)."""
+        # window_activity new columns (C2)
+        new_cols = [
+            ("category",      "TEXT DEFAULT ''"),
+            ("sub_category",  "TEXT DEFAULT ''"),
+            ("site_name",     "TEXT DEFAULT ''"),
+            ("project_name",  "TEXT DEFAULT ''"),
+            ("file_type",     "TEXT DEFAULT ''"),
+            ("content_type",  "TEXT DEFAULT ''"),
+            ("keywords",      "TEXT DEFAULT ''"),
+            ("source",        "TEXT DEFAULT 'desktop'"),
+            ("mem_peak_mb",   "INTEGER DEFAULT 0"),
+            ("is_fullscreen", "INTEGER DEFAULT 0"),
+            ("battery_pct",   "INTEGER DEFAULT -1"),
+            ("power_plugged", "INTEGER DEFAULT 0"),
+        ]
+        for col_name, col_type in new_cols:
+            safe_add_column(conn, "window_activity", col_name, col_type)
+
+        # app_categories table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS app_categories (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                process_match  TEXT NOT NULL UNIQUE,
+                category       TEXT NOT NULL,
+                sub_category   TEXT,
+                is_site        INTEGER DEFAULT 0,
+                rule           TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS resource_samples (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                activity_id    INTEGER NOT NULL,
+                session_id     INTEGER NOT NULL,
+                timestamp      TEXT    NOT NULL,
+                cpu_percent    REAL,
+                ram_used_mb    INTEGER,
+                ram_percent    REAL,
+                battery_pct    INTEGER,
+                power_plugged  INTEGER,
+                FOREIGN KEY (activity_id) REFERENCES window_activity(id) ON DELETE CASCADE,
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            )
+        """)
 
     def close(self):
         """Close the thread-local connection if open."""

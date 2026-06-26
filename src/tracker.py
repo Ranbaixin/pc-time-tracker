@@ -150,16 +150,29 @@ class ActivityRecorder:
         self, session_id: int, process_name: str, window_title: str,
         process_path: Optional[str], tracking_mode: str,
     ) -> int:
-        """Insert a new activity row. Returns the activity id."""
+        """Insert a new activity row with classification fields. Returns the activity id."""
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Classify
+        from .classifier import get_classifier
+        clf = get_classifier()
+        info = clf.classify(process_name, window_title, process_path or "", "desktop")
+
         db = get_db()
         with db.connect() as conn:
             cursor = conn.execute(
                 """INSERT INTO window_activity
                    (session_id, window_title, process_name, process_path,
-                    start_time, tracking_mode, interaction_count)
-                   VALUES (?, ?, ?, ?, ?, ?, 0)""",
-                (session_id, window_title, process_name, process_path, now, tracking_mode),
+                    start_time, tracking_mode, interaction_count,
+                    category, sub_category, site_name, project_name,
+                    file_type, content_type, keywords, source,
+                    mem_peak_mb, is_fullscreen, battery_pct, power_plugged)
+                   VALUES (?, ?, ?, ?, ?, ?, 0,
+                           ?, ?, ?, ?, ?, ?, ?, 'desktop', 0, 0, -1, 0)""",
+                (session_id, window_title, process_name, process_path, now, tracking_mode,
+                 info["category"], info["sub_category"], info["site_name"],
+                 info["project_name"], info["file_type"], info["content_type"],
+                 info["keywords"]),
             )
             self._current_activity_id = cursor.lastrowid
         return self._current_activity_id

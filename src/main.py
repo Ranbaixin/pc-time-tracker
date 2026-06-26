@@ -80,7 +80,7 @@ def cmd_serve(args):
     from fastapi import FastAPI
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import HTMLResponse
-    from .routes import sessions, activity, stats, agent, config_routes, system
+    from .routes import sessions, activity, stats, agent, config_routes, system, browser_activity, classifications
     from .dashboard import get_dashboard_html
 
     app = FastAPI(
@@ -98,6 +98,8 @@ def cmd_serve(args):
     app.include_router(system.router, prefix="/api/v1")
     app.include_router(system.autostart_router, prefix="/api/v1")
     app.include_router(system.backup_router, prefix="/api/v1")
+    app.include_router(browser_activity.router, prefix="/api/v1")
+    app.include_router(classifications.router, prefix="/api/v1")
 
     @app.get("/", response_class=HTMLResponse)
     async def dashboard():

@@ -135,6 +135,24 @@ td.process { color: var(--text); font-weight: 500; }
     <canvas id="chart-timeline" style="max-height:200px;"></canvas>
   </div>
 
+  <!-- Category + Sites -->
+  <div class="charts">
+    <div class="chart-box">
+      <h3>分类占比</h3>
+      <canvas id="chart-categories"></canvas>
+    </div>
+    <div class="chart-box">
+      <h3>访问站点</h3>
+      <canvas id="chart-sites"></canvas>
+    </div>
+  </div>
+
+  <!-- Keywords -->
+  <div class="chart-box" style="margin-bottom:24px">
+    <h3>今日关键词</h3>
+    <div id="keywords-cloud" style="display:flex;flex-wrap:wrap;gap:8px;padding:8px 0;min-height:40px;align-items:center;justify-content:center;color:var(--text-secondary);font-size:0.85rem">--</div>
+  </div>
+
   <!-- Recent Activity -->
   <div class="recent-box">
     <h3>最近活动</h3>
@@ -168,7 +186,7 @@ function updateClock() {
 }
 
 // ---- Chart instances ----
-let weeklyChart, pieChart, timelineChart;
+let weeklyChart, pieChart, timelineChart, categoryChart, sitesChart;
 
 function initCharts() {
   const fontColor = getComputedStyle(document.body).getPropertyValue('--text-secondary').trim();
@@ -197,6 +215,23 @@ function initCharts() {
     options: { responsive: true, maintainAspectRatio: false,
       plugins: { legend: { display: false } },
       scales: { x: { ticks: { color: fontColor, maxTicksLimit: 12 } }, y: { ticks: { color: fontColor, callback: v => Math.round(v/60) }, grid: { color: gridColor } } }
+    }
+  });
+
+  categoryChart = new Chart(document.getElementById('chart-categories'), {
+    type: 'doughnut',
+    data: { labels: [], datasets: [{ data: [], backgroundColor: ['#818cf8','#22c55e','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#f97316'] }] },
+    options: { responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { position: 'right', labels: { color: fontColor, padding: 10, font: { size: 11 } } } }
+    }
+  });
+
+  sitesChart = new Chart(document.getElementById('chart-sites'), {
+    type: 'bar',
+    data: { labels: [], datasets: [{ label: 'min', data: [], backgroundColor: '#a5b4fc', borderRadius: 4 }] },
+    options: { responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+      plugins: { legend: { display: false } },
+      scales: { x: { ticks: { color: fontColor, callback: v => Math.round(v/60) }, grid: { color: gridColor } }, y: { ticks: { color: fontColor, font: { size: 11 } } } }
     }
   });
 }
@@ -363,6 +398,46 @@ async function doBackup() {
   setTimeout(() => { btn.textContent = 'backup'; btn.disabled = false; }, 2000);
 }
 
+async function loadCategories() {
+  try {
+    const res = await fetch(`${API}/stats/categories?date=today`);
+    const json = await res.json();
+    const cats = json.data?.categories || {};
+    const labels = Object.keys(cats);
+    const data = Object.values(cats);
+    categoryChart.data.labels = labels;
+    categoryChart.data.datasets[0].data = data;
+    categoryChart.update();
+  } catch(e) { console.error('categories', e); }
+}
+
+async function loadSites() {
+  try {
+    const res = await fetch(`${API}/stats/sites?date=today&limit=8`);
+    const json = await res.json();
+    const sites = json.data?.sites || [];
+    sitesChart.data.labels = sites.map(s => s.name);
+    sitesChart.data.datasets[0].data = sites.map(s => s.total_seconds);
+    sitesChart.update();
+  } catch(e) { console.error('sites', e); }
+}
+
+async function loadKeywords() {
+  try {
+    const res = await fetch(`${API}/stats/keywords?days=1&limit=30`);
+    const json = await res.json();
+    const kws = json.data?.keywords || [];
+    const el = document.getElementById('keywords-cloud');
+    if (kws.length === 0) { el.textContent = '--'; return; }
+    const max = kws[0]?.count || 1;
+    el.innerHTML = kws.map(k => {
+      const size = 0.7 + (k.count / max) * 1.0;
+      const alpha = 0.4 + (k.count / max) * 0.6;
+      return '<span style="font-size:' + size.toFixed(1) + 'rem;opacity:' + alpha.toFixed(2) + ';background:var(--accent-light);padding:2px 8px;border-radius:12px;color:var(--accent)">' + escapeHtml(k.word) + '</span>';
+    }).join('');
+  } catch(e) { console.error('keywords', e); }
+}
+
 // ---- Initialize ----
 function init() {
   initCharts();
@@ -373,10 +448,13 @@ function init() {
   loadRecent();
   loadStatus();
   loadAutostart();
+  loadCategories();
+  loadSites();
+  loadKeywords();
 
   // Live updates
   setInterval(() => { updateClock(); loadCurrentSession(); loadStatus(); }, 5000);
-  setInterval(() => { loadSummary(); loadDaily(); loadTimeline(); loadRecent(); }, 60000);
+  setInterval(() => { loadSummary(); loadDaily(); loadTimeline(); loadRecent(); loadCategories(); loadSites(); loadKeywords(); }, 60000);
   updateClock();
 }
 

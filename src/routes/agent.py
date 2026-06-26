@@ -176,6 +176,35 @@ def get_agent_context():
 
         text_summary = _generate_text_summary(today, total_seconds, idle_seconds, top_processes)
 
+        # C7: Classification data
+        cat_rows = conn.execute(
+            """SELECT category, COALESCE(SUM(duration_seconds), 0) as total
+               FROM window_activity WHERE date(start_time) = ? AND category != ''
+               GROUP BY category ORDER BY total DESC""",
+            (today,),
+        ).fetchall()
+        categories_today = {r["category"]: int(r["total"]) for r in cat_rows}
+
+        site_rows = conn.execute(
+            """SELECT site_name, COALESCE(SUM(duration_seconds), 0) as total, COUNT(*) as visits
+               FROM window_activity WHERE date(start_time) = ? AND site_name != ''
+               GROUP BY site_name ORDER BY total DESC LIMIT 10""",
+            (today,),
+        ).fetchall()
+        top_sites = [{"name": r["site_name"], "seconds": int(r["total"]), "visits": r["visits"]} for r in site_rows]
+
+        keyword_rows = conn.execute(
+            """SELECT keywords FROM window_activity WHERE date(start_time) = ? AND keywords != ''""",
+            (today,),
+        ).fetchall()
+        kw_count: dict[str, int] = {}
+        for r in keyword_rows:
+            for w in (r["keywords"] or "").split(","):
+                w = w.strip()
+                if w:
+                    kw_count[w] = kw_count.get(w, 0) + 1
+        top_keywords = [{"word": w, "count": c} for w, c in sorted(kw_count.items(), key=lambda x: -x[1])[:20]]
+
     return {
         "data": {
             "current_session": current_session,
@@ -184,6 +213,9 @@ def get_agent_context():
             "timeline_today": timeline_today,
             "text_summary": text_summary,
             "tracking_mode": config.tracker.tracking_mode,
+            "categories_today": categories_today,
+            "top_sites": top_sites,
+            "top_keywords": top_keywords,
             "_metadata": {
                 "db_size_bytes": db_size,
                 "oldest_record": oldest["ts"] if oldest else None,
