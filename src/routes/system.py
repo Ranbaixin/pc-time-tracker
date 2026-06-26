@@ -142,3 +142,25 @@ def create_backup():
     if path:
         return {"data": {"path": path, "message": "备份完成"}}
     return {"data": {"error": "备份失败——数据库不存在"}}
+
+
+# --- Browser Integration Toggle ---
+
+browser_router = APIRouter(prefix="/browser-integration", tags=["Browser Integration"])
+
+
+@browser_router.get("")
+def get_browser_integration():
+    config = load_config()
+    return {"data": {"enabled": config.server.browser_integration}}
+
+
+@browser_router.post("")
+def set_browser_integration(body: AutostartRequest):
+    """Enable/disable browser plugin data sync."""
+    from ..config import load_config, save_config
+    config = load_config()
+    config.server.browser_integration = body.enabled
+    save_config(config)
+    msg = "浏览器插件数据同步已开启" if body.enabled else "已关闭——使用桌面窗口检测"
+    return {"data": {"enabled": body.enabled, "message": msg}}

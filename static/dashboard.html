@@ -78,6 +78,13 @@ td.process { color: var(--text); font-weight: 500; }
   <h1>📊 PC Time Tracker</h1>
   <div class="status">
     <button onclick="doBackup()" style="background:var(--accent);color:#fff;border:none;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:0.8rem;margin-right:12px">备份</button>
+    <div class="toggle-group" style="margin-right:12px">
+      <span class="toggle-label">浏览器插件</span>
+      <label class="toggle-switch">
+        <input type="checkbox" id="browser-toggle" onchange="toggleBrowser()">
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
     <div class="toggle-group">
       <span class="toggle-label">开机自启</span>
       <label class="toggle-switch">
@@ -384,6 +391,16 @@ async function toggleAutostart() {
   }
 }
 
+async function loadBrowserIntegration() {
+  try { const r = await fetch(API + '/browser-integration'); const j = await r.json(); document.getElementById('browser-toggle').checked = j.data?.enabled || false; } catch(e) {}
+}
+async function toggleBrowser() {
+  const enabled = document.getElementById('browser-toggle').checked;
+  try {
+    await fetch(API + '/browser-integration', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({enabled}) });
+    setTimeout(loadBrowserIntegration, 500);
+  } catch(e) { document.getElementById('browser-toggle').checked = !enabled; }
+}
 async function doBackup() {
   const btn = event.target;
   btn.textContent = '...';
@@ -448,6 +465,7 @@ function init() {
   loadRecent();
   loadStatus();
   loadAutostart();
+  loadBrowserIntegration();
   loadCategories();
   loadSites();
   loadKeywords();

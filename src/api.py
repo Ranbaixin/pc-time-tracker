@@ -104,6 +104,7 @@ def create_app() -> FastAPI:
     app.include_router(system.backup_router, prefix="/api/v1")
     app.include_router(browser_activity.router, prefix="/api/v1")
     app.include_router(classifications.router, prefix="/api/v1")
+    app.include_router(system.browser_router, prefix="/api/v1")
 
     # Dashboard route
     @app.get("/", response_class=HTMLResponse)

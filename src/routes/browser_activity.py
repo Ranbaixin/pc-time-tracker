@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from ..database import get_db
 from ..classifier import get_classifier
+from ..config import load_config
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,12 @@ def receive_browser_activity(payload: BrowserBatch | BrowserSession):
 
     Accepts both a single session or a batch of sessions.
     Each session is mapped to a window_activity row with source='browser'.
+    Returns 204 if browser integration is disabled (plugin should fallback gracefully).
     """
+    config = load_config()
+    if not config.server.browser_integration:
+        return {"data": {"received": 0, "message": "Browser integration disabled", "enabled": False}}
+
     sessions = payload.sessions if isinstance(payload, BrowserBatch) else [payload]
     if not sessions:
         return {"data": {"received": 0, "message": "Empty batch"}}

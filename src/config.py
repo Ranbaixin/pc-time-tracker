@@ -29,6 +29,7 @@ class ServerConfig(BaseModel):
     port: int = Field(default=8080, ge=1024, le=65535)
     enable_dashboard: bool = True
     enable_swagger: bool = True
+    browser_integration: bool = False
 
 
 class DatabaseConfig(BaseModel):
