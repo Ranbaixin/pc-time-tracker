@@ -442,12 +442,18 @@ class TrackerEngine:
                 break
 
     def _shutdown(self):
-        """Clean shutdown: close activity and session."""
+        """Clean shutdown: close activity, session, and backup database."""
         try:
             self.activity_recorder.close_activity()
             session = self.session_mgr.get_active_session()
             if session:
                 self.session_mgr.close_session(session["id"], reason="tracker_shutdown")
+            # Auto-backup on clean shutdown
+            try:
+                from .backup import backup_database
+                backup_database(self.config.database.path)
+            except Exception:
+                pass
         except Exception:
             logger.exception("Error during tracker shutdown")
 

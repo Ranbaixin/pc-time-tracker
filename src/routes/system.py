@@ -117,3 +117,28 @@ def set_autostart(body: AutostartRequest):
             return {
                 "data": {"enabled": True, "error": f"删除启动文件失败: {str(e)}"}
             }
+
+
+# --- Backup ---
+
+backup_router = APIRouter(prefix="/backup", tags=["Backup"])
+
+
+@backup_router.get("")
+def list_backups():
+    """List all database backups."""
+    from ..backup import list_backups as lb
+    backups = lb()
+    return {"data": {"backups": backups, "count": len(backups)}}
+
+
+@backup_router.post("")
+def create_backup():
+    """Manually create a database backup."""
+    from ..config import load_config
+    from ..backup import backup_database
+    config = load_config()
+    path = backup_database(config.database.path)
+    if path:
+        return {"data": {"path": path, "message": "备份完成"}}
+    return {"data": {"error": "备份失败——数据库不存在"}}

@@ -85,7 +85,7 @@ def create_app() -> FastAPI:
     # CORS — restrict to localhost only (no wildcard origins)
     app.add_middleware(
         CORSMiddleware,
-        allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?$",,
+        allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?$",
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT"],
         allow_headers=["Content-Type"],
@@ -99,6 +99,7 @@ def create_app() -> FastAPI:
     app.include_router(config_routes.router, prefix="/api/v1")
     app.include_router(system.router, prefix="/api/v1")
     app.include_router(system.autostart_router, prefix="/api/v1")
+    app.include_router(system.backup_router, prefix="/api/v1")
 
     # Dashboard route
     @app.get("/", response_class=HTMLResponse)

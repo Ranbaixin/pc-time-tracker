@@ -3,3 +3,5 @@ __pycache__/
 data/tracker.db*
 logs/
 .env
+data/backups/
+*.bak

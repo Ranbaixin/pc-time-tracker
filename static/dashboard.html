@@ -77,6 +77,7 @@ td.process { color: var(--text); font-weight: 500; }
 <div class="header">
   <h1>📊 PC Time Tracker</h1>
   <div class="status">
+    <button onclick="doBackup()" style="background:var(--accent);color:#fff;border:none;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:0.8rem;margin-right:12px">备份</button>
     <div class="toggle-group">
       <span class="toggle-label">开机自启</span>
       <label class="toggle-switch">
@@ -100,9 +101,9 @@ td.process { color: var(--text); font-weight: 500; }
       <div class="sub" id="today-idle"></div>
     </div>
     <div class="card">
-      <div class="label">当前会话</div>
-      <div class="value" id="session-elapsed">--</div>
-      <div class="sub" id="session-window"></div>
+      <div class="label">当前窗口</div>
+      <div class="value" id="session-window-short">--</div>
+      <div class="sub" id="session-elapsed-text"></div>
     </div>
     <div class="card">
       <div class="label">今日 Top 应用</div>
@@ -195,7 +196,7 @@ function initCharts() {
     data: { labels: Array.from({length:24},(_,i)=>i+'时'), datasets: [{ label: '分钟', data: Array(24).fill(0), backgroundColor: '#a5b4fc', borderRadius: 2 }] },
     options: { responsive: true, maintainAspectRatio: false,
       plugins: { legend: { display: false } },
-      scales: { x: { ticks: { color: fontColor, maxTicksLimit: 12 } }, y: { ticks: { color: fontColor, callback: v => Math.round(v/60)+'h' }, grid: { color: gridColor } } }
+      scales: { x: { ticks: { color: fontColor, maxTicksLimit: 12 } }, y: { ticks: { color: fontColor, callback: v => Math.round(v/60) }, grid: { color: gridColor } } }
     }
   });
 }
@@ -259,15 +260,15 @@ async function loadCurrentSession() {
     const d = json.data;
     if (!d) return;
 
-    document.getElementById('session-elapsed').textContent = fmtDuration(d.elapsed_seconds);
     if (d.active_window) {
       const p = d.active_window.process_name.replace('.exe','');
-      const t = d.active_window.window_title.length > 35
-        ? d.active_window.window_title.slice(0, 35) + '...' : d.active_window.window_title;
-      document.getElementById('session-window').textContent = `${p} — ${t || '(无标题)'}`;
+      document.getElementById('session-window-short').textContent = p;
     } else {
-      document.getElementById('session-window').textContent = '空闲中...';
+      document.getElementById('session-window-short').textContent = '空闲';
     }
+    // Show session uptime as small sub-text
+    document.getElementById('session-elapsed-text').textContent =
+      '已运行 ' + fmtDuration(d.elapsed_seconds);
   } catch(e) { console.error('session', e); }
 }
 
@@ -346,6 +347,20 @@ async function toggleAutostart() {
     // Revert on error
     document.getElementById('autostart-toggle').checked = !enabled;
   }
+}
+
+async function doBackup() {
+  const btn = event.target;
+  btn.textContent = '...';
+  btn.disabled = true;
+  try {
+    const res = await fetch(`${API}/backup`, { method: 'POST' });
+    const json = await res.json();
+    btn.textContent = json.data?.error ? 'Failed' : 'OK';
+  } catch(e) {
+    btn.textContent = 'Error';
+  }
+  setTimeout(() => { btn.textContent = 'backup'; btn.disabled = false; }, 2000);
 }
 
 // ---- Initialize ----

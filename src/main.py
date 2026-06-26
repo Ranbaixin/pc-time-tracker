@@ -97,6 +97,7 @@ def cmd_serve(args):
     app.include_router(config_routes.router, prefix="/api/v1")
     app.include_router(system.router, prefix="/api/v1")
     app.include_router(system.autostart_router, prefix="/api/v1")
+    app.include_router(system.backup_router, prefix="/api/v1")
 
     @app.get("/", response_class=HTMLResponse)
     async def dashboard():
@@ -187,6 +188,23 @@ def cmd_config(args):
     print(json.dumps(config.model_dump(), indent=2, ensure_ascii=False))
 
 
+def cmd_backup(args):
+    """Manually backup the database."""
+    from .config import load_config
+    from .backup import backup_database, list_backups
+
+    config = load_config()
+    path = backup_database(config.database.path)
+    if path:
+        print(f"Backup created: {path}")
+        print(f"\nAll backups:")
+        for b in list_backups():
+            size_kb = b['size_bytes'] / 1024
+            print(f"  {b['name']}  ({size_kb:.1f} KB)  {b['created']}")
+    else:
+        print("Backup failed — database not found.")
+
+
 def cmd_install(args):
     """Register Windows Task Scheduler for auto-start on login."""
     main_script = str(PROJECT_DIR / "src" / "main.py")
@@ -250,6 +268,8 @@ def main():
 
     p_config = sub.add_parser("config", help="查看当前配置")
 
+    p_backup = sub.add_parser("backup", help="手动备份数据库")
+
     p_install = sub.add_parser("install", help="注册开机自启（Windows Task Scheduler）")
 
     p_uninstall = sub.add_parser("uninstall", help="移除开机自启任务")
@@ -267,6 +287,7 @@ def main():
         "serve": cmd_serve,
         "stats": cmd_stats,
         "config": cmd_config,
+        "backup": cmd_backup,
         "install": cmd_install,
         "uninstall": cmd_uninstall,
     }
