@@ -61,63 +61,66 @@ def get_status():
     }
 
 
-# --- Autostart (Windows Startup Folder, no admin required) ---
+# --- Autostart (Windows Registry Run key — most reliable) ---
+
+import winreg
 
 STARTUP_DIR = os.path.join(
     os.environ.get("APPDATA", ""),
     "Microsoft", "Windows", "Start Menu", "Programs", "Startup"
 )
 STARTUP_VBS = os.path.join(STARTUP_DIR, "PCTimeTracker.vbs")
+REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+REG_VALUE = "PCTimeTracker"
 
 
 def _check_autostart_enabled() -> bool:
-    """Check if the startup .vbs file exists."""
-    return os.path.isfile(STARTUP_VBS)
+    """Check if autostart is registered in Windows Registry."""
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_KEY, 0, winreg.KEY_READ)
+        try:
+            value, _ = winreg.QueryValueEx(key, REG_VALUE)
+            return bool(value)
+        except FileNotFoundError:
+            return False
+        finally:
+            winreg.CloseKey(key)
+    except Exception:
+        return os.path.isfile(STARTUP_VBS)
 
 
 @autostart_router.get("")
 def get_autostart():
-    """Check if auto-start is enabled (via Startup folder)."""
+    """Check if auto-start is enabled."""
     return {"data": {"enabled": _check_autostart_enabled()}}
 
 
 @autostart_router.post("")
 def set_autostart(body: AutostartRequest):
-    """Enable or disable auto-start on login via Startup folder. No admin required."""
+    """Enable/disable auto-start via Windows Registry Run key (most reliable)."""
     if body.enabled:
         try:
-            os.makedirs(STARTUP_DIR, exist_ok=True)
-            main_script = os.path.join(PROJECT_DIR, "src", "main.py")
-            # VBS runs pythonw completely silently — no terminal flash
-            vbs_content = (
-                f'CreateObject("Wscript.Shell").Run '
-                f'"""{PYTHONW}" "{main_script}" run"", 0, False\r\n'
-            )
-            with open(STARTUP_VBS, "w", encoding="utf-8") as f:
-                f.write(vbs_content)
-            return {
-                "data": {"enabled": True, "message": "已开启开机自启。下次登录时静默启动，不会弹出窗口。"}
-            }
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_KEY, 0, winreg.KEY_SET_VALUE)
+            cmd = f'cmd /c "cd /d {PROJECT_DIR} && {PYTHONW} -m src.main run"'
+            winreg.SetValueEx(key, REG_VALUE, 0, winreg.REG_SZ, cmd)
+            winreg.CloseKey(key)
+            return {"data": {"enabled": True, "message": "已开启开机自启（注册表）。"}}
         except Exception as e:
-            return {
-                "data": {"enabled": False, "error": f"写入启动文件失败: {str(e)}"}
-            }
+            return {"data": {"enabled": False, "error": str(e)}}
     else:
         try:
-            if os.path.isfile(STARTUP_VBS):
-                os.remove(STARTUP_VBS)
-            # Clean up old .bat file if it exists
-            old_bat = STARTUP_VBS.replace(".vbs", ".bat")
-            if os.path.isfile(old_bat):
-                os.remove(old_bat)
-            return {
-                "data": {"enabled": False, "message": "已关闭开机自启。"}
-            }
-        except Exception as e:
-            return {
-                "data": {"enabled": True, "error": f"删除启动文件失败: {str(e)}"}
-            }
-
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_KEY, 0, winreg.KEY_SET_VALUE)
+            try:
+                winreg.DeleteValue(key, REG_VALUE)
+            except FileNotFoundError:
+                pass
+            winreg.CloseKey(key)
+        except Exception:
+            pass
+        for f in [STARTUP_VBS, STARTUP_VBS.replace(".vbs", ".bat")]:
+            if os.path.isfile(f):
+                os.remove(f)
+        return {"data": {"enabled": False, "message": "已关闭开机自启。"}}
 
 # --- Backup ---
 
