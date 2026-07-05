@@ -107,7 +107,7 @@ class ActivityClassifier:
         ("Stack Overflow", "StackOverflow"), ("StackOverflow", "StackOverflow"),
         ("ChatGPT", "ChatGPT"), ("Claude", "Claude"), ("知乎", "知乎"),
         ("百度", "百度"), ("Google", "Google"),
-        ("Notion", "Notion"), ("Twitter", "Twitter"), ("X", "Twitter"),
+        ("Notion", "Notion"), ("Twitter", "Twitter"), ("x.com", "Twitter"),
         ("Reddit", "Reddit"), ("掘金", "掘金"), ("CSDN", "CSDN"),
         ("Gitee", "Gitee"), ("CodePen", "CodePen"),
         ("Figma", "Figma"), ("Canva", "Canva"),

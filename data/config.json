@@ -12,7 +12,7 @@
     "port": 8088,
     "enable_dashboard": true,
     "enable_swagger": true,
-    "browser_integration": false
+    "browser_integration": true
   },
   "database": {
     "path": "data/tracker.db"
