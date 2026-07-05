@@ -113,6 +113,12 @@ class ActivityClassifier:
         "df_helper_main.exe":                ("游戏", "游戏助手"),
         "wallpaperui.exe":                   ("系统", "桌面美化"),
         "wallpaper64.exe":                   ("系统", "桌面美化"),
+        # More tools
+        "upc.exe":                           ("系统", "系统更新"),
+        "Typora.exe":                        ("生产力", "写作"),
+        "dxdiag.exe":                        ("系统", "诊断工具"),
+        "SnippingTool.exe":                  ("生产力", "截图"),
+        "UbisoftConnectInstaller.exe":       ("游戏", "游戏平台"),
         "Taskmgr.exe":           ("系统", "任务管理"),
         "LockApp.exe":           ("系统", "锁屏"),
         "ShellHost.exe":         ("系统", "系统界面"),
