@@ -88,10 +88,14 @@ def receive_browser_activity(payload: BrowserBatch | BrowserSession):
             process_name = f"[Browser] {sess.domain}"
             window_title = sess.title or sess.url
 
-            # Classify
+            # Classify — use exact domain as site_name; classifier may refine it
             info = classifier.classify(
                 process_name, window_title, sess.url, source="browser"
             )
+            # Always prefer the exact domain from the browser extension.
+            # This keeps site_name consistent (e.g. "github.com" not "GitHub").
+            if not info["site_name"]:
+                info["site_name"] = sess.domain
 
             with db.connect() as conn:
                 conn.execute(
@@ -106,7 +110,7 @@ def receive_browser_activity(payload: BrowserBatch | BrowserSession):
                         session_id, window_title, process_name, sess.url,
                         start_str, end_str, duration_sec,
                         info["category"], info["sub_category"],
-                        info["site_name"] or sess.domain,
+                        sess.domain,   # exact domain, not classifier's fuzzy match
                         info["project_name"], info["file_type"],
                         info["content_type"], info["keywords"],
                     ),
