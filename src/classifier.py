@@ -73,8 +73,46 @@ class ActivityClassifier:
         "POWERPNT.EXE":          ("生产力", "演示"),
         "OUTLOOK.EXE":           ("生产力", "邮件"),
         "notion.exe":            ("生产力", "笔记"),
-        # System
-        "explorer.exe":          ("系统", "文件管理"),
+        # Games
+        "dontstarve_steam_x64.exe":         ("游戏", "饥荒"),
+        "DeltaForceClient-Win64-Shipping.exe": ("游戏", "三角洲行动"),
+        "kards-Win64-Shipping.exe":         ("游戏", "KARDS"),
+        "wegame.exe":                        ("游戏", "游戏平台"),
+        # System / Utility
+        "System Idle Process":               ("系统", "空闲"),
+        "VoiceAccess.exe":                   ("系统", "语音控制"),
+        "SearchHost.exe":                    ("系统", "搜索"),
+        "ApplicationFrameHost.exe":          ("系统", "UWP框架"),
+        "CredentialUIBroker.exe":            ("系统", "安全认证"),
+        "OpenWith.exe":                      ("系统", "打开方式"),
+        "msiexec.exe":                       ("系统", "安装程序"),
+        # Hardware / Peripherals
+        "bambu-studio.exe":                  ("创作", "3D打印"),
+        "Lenovo Legion Toolkit.exe":         ("系统", "硬件管理"),
+        "LenovoPcManager.exe":               ("系统", "硬件管理"),
+        # Dev Tools
+        "java.exe":                          ("开发", "Java运行时"),
+        "stm32cubeide.exe":                  ("开发", "嵌入式开发"),
+        "openscad.exe":                      ("开发", "3D建模"),
+        "OpenSCAD-2021.01-x86-64-Installer.exe": ("系统", "安装程序"),
+        # Design / CAD
+        "ZWCAD.exe":                         ("创作", "CAD"),
+        "acad.exe":                          ("创作", "CAD"),
+        "LeopardCAD.exe":                    ("创作", "CAD"),
+        # Network / Proxy
+        "v2rayN.exe":                        ("系统", "网络代理"),
+        "cc-switch.exe":                     ("系统", "网络代理"),
+        # Cloud Storage
+        "BaiduNetdiskUnite.exe":             ("生产力", "网盘"),
+        "BaiduNetdisk.exe":                  ("生产力", "网盘"),
+        # Other Tools
+        "browser.exe":                       ("浏览", "浏览器"),
+        "Photos.exe":                        ("创作", "图片"),
+        "WeChatAppEx.exe":                   ("社交", "小程序"),
+        "ACE-Helper.exe":                    ("系统", "反作弊"),
+        "df_helper_main.exe":                ("游戏", "游戏助手"),
+        "wallpaperui.exe":                   ("系统", "桌面美化"),
+        "wallpaper64.exe":                   ("系统", "桌面美化"),
         "Taskmgr.exe":           ("系统", "任务管理"),
         "LockApp.exe":           ("系统", "锁屏"),
         "ShellHost.exe":         ("系统", "系统界面"),
