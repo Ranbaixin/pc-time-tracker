@@ -41,18 +41,21 @@ async def lifespan(app: FastAPI):
 
     config = load_config()
 
+    # Resolve relative paths against project root (not CWD)
+    _base = Path(__file__).resolve().parent.parent
+
     # Setup logging
     logging.basicConfig(
         level=getattr(logging, config.logging.level, logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         handlers=[
             logging.StreamHandler(),
-            logging.FileHandler(config.logging.file, encoding="utf-8"),
+            logging.FileHandler(str(_base / config.logging.file), encoding="utf-8"),
         ],
     )
 
     # Initialize database
-    db = init_db(config.database.path)
+    db = init_db(str(_base / config.database.path))
     logger.info(f"Database initialized: {config.database.path}")
 
     # Start tracker

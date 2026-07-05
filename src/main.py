@@ -255,6 +255,11 @@ def cmd_uninstall(args):
 
 
 def main():
+    # Ensure CWD is project root so relative paths (db, logs) resolve correctly.
+    # Critical for autostart via registry, where CWD is not the project dir.
+    import os as _os
+    _os.chdir(str(PROJECT_DIR))
+
     parser = argparse.ArgumentParser(
         description="PC Time Tracker — Windows 电脑使用时间追踪",
         prog="python -m src.main",

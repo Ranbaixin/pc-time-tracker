@@ -5,3 +5,6 @@ logs/
 .env
 data/backups/
 *.bak
+# autostart scripts (contain hardcoded local paths, not portable)
+*.vbs
+*.bat

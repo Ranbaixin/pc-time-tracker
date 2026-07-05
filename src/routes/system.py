@@ -97,11 +97,13 @@ def get_autostart():
 
 @autostart_router.post("")
 def set_autostart(body: AutostartRequest):
-    """Enable/disable auto-start via Windows Registry Run key (most reliable)."""
+    """Enable/disable auto-start via Windows Registry Run key → VBS bridge.
+    VBS sets CWD before launching pythonw, solving the chicken-and-egg problem
+    where -m src.main needs the project dir as CWD before Python can import src."""
     if body.enabled:
         try:
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_KEY, 0, winreg.KEY_SET_VALUE)
-            cmd = f'cmd /c "cd /d {PROJECT_DIR} && {PYTHONW} -m src.main run"'
+            cmd = os.path.join(PROJECT_DIR, "start_tracker.vbs")
             winreg.SetValueEx(key, REG_VALUE, 0, winreg.REG_SZ, cmd)
             winreg.CloseKey(key)
             return {"data": {"enabled": True, "message": "已开启开机自启（注册表）。"}}
