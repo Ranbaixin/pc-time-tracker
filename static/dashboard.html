@@ -70,6 +70,14 @@ td.process { color: var(--text); font-weight: 500; }
 .toggle-slider::before { content: ''; position: absolute; height: 16px; width: 16px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: 0.2s; }
 .toggle-switch input:checked + .toggle-slider { background: var(--accent); }
 .toggle-switch input:checked + .toggle-slider::before { transform: translateX(18px); }
+
+/* Modal */
+.modal-overlay { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:1000; justify-content:center; align-items:center; }
+.modal-overlay.show { display:flex; }
+.modal-box { background:var(--card-bg); border-radius:12px; padding:24px; max-width:500px; width:90%; position:relative; }
+.modal-box h3 { margin-bottom:12px; }
+.modal-close { position:absolute; top:8px; right:12px; background:none; border:none; font-size:1.2rem; cursor:pointer; color:var(--text-secondary); }
+
 </style>
 </head>
 <body>
@@ -127,7 +135,7 @@ td.process { color: var(--text); font-weight: 500; }
   <!-- Charts -->
   <div class="charts">
     <div class="chart-box">
-      <h3>最近 7 天使用趋势</h3>
+      <h3>最近 <select id="days-select" onchange="onDaysChange()" style="background:var(--card-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:0.85rem;cursor:pointer"><option value="7">7</option><option value="14">14</option><option value="30">30</option></select> 天使用趋势 <span style="font-size:0.7rem;color:var(--text-secondary)">(点击柱状图查看当天详情)</span></h3>
       <canvas id="chart-weekly"></canvas>
     </div>
     <div class="chart-box">
@@ -168,6 +176,15 @@ td.process { color: var(--text); font-weight: 500; }
 
 </div>
 
+<!-- Modal for daily detail -->
+<div class="modal-overlay" id="day-modal">
+  <div class="modal-box">
+    <button class="modal-close" onclick="closeModal()">&times;</button>
+    <h3 id="modal-date">--</h3>
+    <canvas id="chart-day-detail" style="max-height:350px"></canvas>
+  </div>
+</div>
+
 <script>
 const API = '/api/v1';
 
@@ -193,7 +210,8 @@ function updateClock() {
 }
 
 // ---- Chart instances ----
-let weeklyChart, pieChart, timelineChart, categoryChart, sitesChart;
+let weeklyChart, pieChart, timelineChart, categoryChart, sitesChart, dayDetailChart;
+let currentDays = 7;
 
 function initCharts() {
   const fontColor = getComputedStyle(document.body).getPropertyValue('--text-secondary').trim();
@@ -201,10 +219,19 @@ function initCharts() {
 
   weeklyChart = new Chart(document.getElementById('chart-weekly'), {
     type: 'bar',
-    data: { labels: [], datasets: [{ label: '活跃时间 (小时)', data: [], backgroundColor: '#818cf8', borderRadius: 4 }] },
+    data: { labels: [], datasets: [{ label: 'h', data: [], backgroundColor: '#818cf8', borderRadius: 4 }] },
     options: { responsive: true, maintainAspectRatio: false,
+      onClick: (e, el) => { if (el.length) { const i = el[0].index; showDayDetail(weeklyChart.data.labels[i]); } },
       plugins: { legend: { display: false } },
       scales: { x: { ticks: { color: fontColor } }, y: { ticks: { color: fontColor, callback: v => v + 'h' }, grid: { color: gridColor } } }
+    }
+  });
+
+  dayDetailChart = new Chart(document.getElementById('chart-day-detail'), {
+    type: 'doughnut',
+    data: { labels: [], datasets: [{ data: [], backgroundColor: ['#818cf8','#22c55e','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#f97316','#84cc16','#ec4899','#14b8a6'] }] },
+    options: { responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { position: 'right', labels: { color: fontColor, padding: 10, font: { size: 11 } } } }
     }
   });
 
@@ -271,18 +298,50 @@ async function loadSummary() {
 
 async function loadDaily() {
   try {
-    const res = await fetch(`${API}/stats/daily?days=7`);
+    const res = await fetch(`${API}/stats/daily?days=${currentDays}`);
     const json = await res.json();
     const daily = json.data?.daily || [];
 
-    const labels = daily.map(d => d.date.slice(5)); // MM-DD
+    const labels = daily.map(d => d.date.slice(5));
     const data = daily.map(d => Math.round(d.total_seconds / 3600 * 10) / 10);
 
     weeklyChart.data.labels = labels;
     weeklyChart.data.datasets[0].data = data;
+    weeklyChart.data.datasets[0].label = 'h';
     weeklyChart.update();
+
+    // Store full dates for modal lookup
+    weeklyChart._fullDates = daily.map(d => d.date);
   } catch(e) { console.error('daily', e); }
 }
+
+function onDaysChange() {
+  currentDays = parseInt(document.getElementById('days-select').value);
+  loadDaily();
+}
+
+async function showDayDetail(mmdd) {
+  const idx = weeklyChart.data.labels.indexOf(mmdd);
+  const fullDate = (idx >= 0 && weeklyChart._fullDates) ? weeklyChart._fullDates[idx] : '2026-' + mmdd;
+  document.getElementById('modal-date').textContent = fullDate;
+  document.getElementById('day-modal').classList.add('show');
+
+  try {
+    const res = await fetch(`${API}/stats/processes?date=${fullDate}&limit=10`);
+    const json = await res.json();
+    const procs = json.data?.processes || [];
+    dayDetailChart.data.labels = procs.map(p => p.process_name.replace('.exe',''));
+    dayDetailChart.data.datasets[0].data = procs.map(p => p.total_seconds);
+    dayDetailChart.update();
+  } catch(e) { console.error('day detail', e); }
+}
+
+function closeModal() {
+  document.getElementById('day-modal').classList.remove('show');
+}
+document.getElementById('day-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeModal();
+});
 
 async function loadTimeline() {
   try {
