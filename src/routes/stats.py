@@ -36,7 +36,7 @@ def get_summary(
             (date,),
         ).fetchone()
 
-        total_seconds = int(row["total_seconds"])
+        total_seconds = min(int(row["total_seconds"]), 86400)
         window_count = row["window_count"]
 
         # Idle / sleep time
@@ -115,26 +115,40 @@ def get_daily_stats(
             (date_from, date_to),
         ).fetchall()
 
+    # Build a dict of existing dates, then fill in all missing days with zeros
+    date_map = {r["date"]: {"total_seconds": int(r["total_seconds"]),
+                             "idle_seconds": int(r["idle_seconds"])} for r in rows}
+
     daily_data = []
-    for r in rows:
-        # Get top process for this day
-        top = conn.execute(
-            """SELECT process_name, SUM(duration_seconds) as s
-               FROM window_activity
-               WHERE date(start_time) = ?
-                 AND process_name NOT IN ('[System Sleep]', '<exited>')
-                 AND duration_seconds IS NOT NULL
-               GROUP BY process_name
-               ORDER BY s DESC LIMIT 1""",
-            (r["date"],),
-        ).fetchone()
+    d = datetime.strptime(date_from, "%Y-%m-%d")
+    d_end = datetime.strptime(date_to, "%Y-%m-%d")
+    while d <= d_end:
+        ds = d.strftime("%Y-%m-%d")
+        info = date_map.get(ds, {"total_seconds": 0, "idle_seconds": 0})
+        capped = min(info["total_seconds"], 86400)
+        capped_idle = min(info["idle_seconds"], 86400)
+
+        # Get top process for this day (only if data exists)
+        top = None
+        if info["total_seconds"] > 0:
+            top = conn.execute(
+                """SELECT process_name, SUM(duration_seconds) as s
+                   FROM window_activity
+                   WHERE date(start_time) = ?
+                     AND process_name NOT IN ('[System Sleep]', '<exited>')
+                     AND duration_seconds IS NOT NULL
+                   GROUP BY process_name
+                   ORDER BY s DESC LIMIT 1""",
+                (ds,),
+            ).fetchone()
 
         daily_data.append({
-            "date": r["date"],
-            "total_seconds": int(r["total_seconds"]),
-            "idle_seconds": int(r["idle_seconds"]),
+            "date": ds,
+            "total_seconds": capped,
+            "idle_seconds": capped_idle,
             "top_process": top["process_name"] if top else None,
         })
+        d += timedelta(days=1)
 
     return {"data": {"daily": daily_data, "date_from": date_from, "date_to": date_to}}
 
