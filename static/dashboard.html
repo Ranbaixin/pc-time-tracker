@@ -146,7 +146,7 @@ td.process { color: var(--text); font-weight: 500; }
 
   <!-- Hourly Timeline -->
   <div class="timeline-box">
-    <h3>今日每小时活跃度</h3>
+    <h3>每小时活跃度 <select id="timeline-date-select" onchange="onTimelineDateChange()" style="background:var(--card-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:0.85rem;cursor:pointer"><option value="today">今日</option></select></h3>
     <canvas id="chart-timeline" style="max-height:200px;"></canvas>
   </div>
 
@@ -212,6 +212,7 @@ function updateClock() {
 // ---- Chart instances ----
 let weeklyChart, pieChart, timelineChart, categoryChart, sitesChart, dayDetailChart;
 let currentDays = 7;
+let currentTimelineDate = 'today';
 
 function initCharts() {
   const fontColor = getComputedStyle(document.body).getPropertyValue('--text-secondary').trim();
@@ -345,13 +346,38 @@ document.getElementById('day-modal').addEventListener('click', function(e) {
 
 async function loadTimeline() {
   try {
-    const res = await fetch(`${API}/stats/timeline?date=today`);
+    const res = await fetch(`${API}/stats/timeline?date=${currentTimelineDate}`);
     const json = await res.json();
     const timeline = json.data?.timeline || [];
 
     timelineChart.data.datasets[0].data = timeline.map(t => t.active_seconds);
     timelineChart.update();
   } catch(e) { console.error('timeline', e); }
+}
+
+function onTimelineDateChange() {
+  currentTimelineDate = document.getElementById('timeline-date-select').value;
+  loadTimeline();
+  // Populate the dropdown with available dates
+  populateTimelineDates();
+}
+
+async function populateTimelineDates() {
+  const sel = document.getElementById('timeline-date-select');
+  if (sel.options.length > 1) return; // Already populated
+  try {
+    const res = await fetch(`${API}/stats/daily?days=30`);
+    const json = await res.json();
+    const daily = json.data?.daily || [];
+    for (const d of daily) {
+      if (d.total_seconds > 0) {
+        const opt = document.createElement('option');
+        opt.value = d.date;
+        opt.textContent = d.date.slice(5); // MM-DD
+        sel.appendChild(opt);
+      }
+    }
+  } catch(e) {}
 }
 
 async function loadCurrentSession() {
@@ -521,6 +547,7 @@ function init() {
   loadDaily();
   loadTimeline();
   loadCurrentSession();
+  populateTimelineDates();
   loadRecent();
   loadStatus();
   loadAutostart();
