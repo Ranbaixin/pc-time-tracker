@@ -150,7 +150,11 @@ class ActivityRecorder:
         self, session_id: int, process_name: str, window_title: str,
         process_path: Optional[str], tracking_mode: str,
     ) -> int:
-        """Insert a new activity row with classification fields. Returns the activity id."""
+        """Insert a new activity row. Closes any lingering open activity first."""
+        # Safety: close any existing open activity before starting a new one
+        if self._current_activity_id is not None:
+            self.close_activity()
+
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         # Classify
@@ -178,13 +182,24 @@ class ActivityRecorder:
         return self._current_activity_id
 
     def close_activity(self) -> Optional[dict]:
-        """Close the current open activity. Returns the closed row or None."""
+        """Close the current open activity. Returns the closed row or None.
+        Also verifies the activity exists and is still open to prevent duplicate closes."""
         if self._current_activity_id is None:
             return None
 
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         db = get_db()
         with db.connect() as conn:
+            # Verify row still exists and is open
+            existing = conn.execute(
+                "SELECT id, end_time FROM window_activity WHERE id = ?",
+                (self._current_activity_id,)
+            ).fetchone()
+            if not existing or existing["end_time"] is not None:
+                # Already closed or missing — don't double-close
+                self._current_activity_id = None
+                return None
+
             conn.execute(
                 """UPDATE window_activity
                    SET end_time = ?,
@@ -398,7 +413,8 @@ class TrackerEngine:
         self._shutdown()
 
     def _detect_sleep(self):
-        """Detect if the system went to sleep since the last poll."""
+        """Detect if the system went to sleep since the last poll.
+        Also detects multi-day gaps (system shutdown/reboot) and cleans up stale activities."""
         if self._last_poll_real_time is None:
             self._last_poll_real_time = time.time()
             return
@@ -410,21 +426,36 @@ class TrackerEngine:
         )
 
         if gap > threshold:
-            logger.info(f"Sleep detected — gap={gap:.0f}s threshold={threshold:.0f}s")
+            logger.info(f"Gap detected — gap={gap:.0f}s threshold={threshold:.0f}s")
 
-            # Close current activity
+            # Close any lingering open activity
             self.activity_recorder.close_activity()
             self._previous_process = None
             self._previous_title = None
 
-            # Record a sleep marker
+            # Also close ALL open activities for the current session
+            # (safety net for any edge case where multiple open rows exist)
             session = self.session_mgr.get_active_session()
             if session:
                 now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                db = get_db()
+                with db.connect() as conn:
+                    conn.execute(
+                        """UPDATE window_activity
+                           SET end_time = ?,
+                               duration_seconds = CAST(
+                                   (strftime('%s', ?) - strftime('%s', start_time)) AS INTEGER
+                               )
+                           WHERE session_id = ? AND end_time IS NULL""",
+                        (now, now, session["id"]),
+                    )
+                logger.info("Closed all open activities for session %d", session["id"])
+
+            # Record a sleep marker
+            if session:
                 sleep_start = datetime.fromtimestamp(
                     self._last_poll_real_time
                 ).strftime("%Y-%m-%d %H:%M:%S")
-
                 db = get_db()
                 with db.connect() as conn:
                     conn.execute(
