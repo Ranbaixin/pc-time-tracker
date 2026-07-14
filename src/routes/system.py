@@ -1,18 +1,17 @@
 """System/status endpoints — /api/v1/status and /api/v1/autostart"""
 
-import sys, os
+import os
 from datetime import datetime
-from typing import Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ..config import load_config
 from ..windows_api import get_file_size_bytes
-from ..tracker import TrackerState
+from ..database import get_db
+from ..runtime import tracker_snapshot
 
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-PYTHONW = sys.executable.replace("python.exe", "pythonw.exe")
 
 router = APIRouter(prefix="/status", tags=["System"])
 autostart_router = APIRouter(prefix="/autostart", tags=["Autostart"])
@@ -23,12 +22,9 @@ class AutostartRequest(BaseModel):
 
 
 # This will be set by api.py on startup
-_tracker_state: Optional[TrackerState] = None
-
-
-def set_tracker_state(state: TrackerState):
-    global _tracker_state
-    _tracker_state = state
+def set_tracker_state(state):
+    """Deprecated compatibility shim; runtime registry owns tracker state."""
+    return None
 
 
 @router.get("")
@@ -36,10 +32,7 @@ def get_status():
     """Get tracker health status."""
     config = load_config()
 
-    if _tracker_state:
-        snapshot = _tracker_state.snapshot()
-    else:
-        snapshot = {"running": False}
+    snapshot = tracker_snapshot()
 
     db_size = get_file_size_bytes(config.database.path)
     log_size = get_file_size_bytes(config.logging.file)
@@ -57,36 +50,18 @@ def get_status():
             "database_size_bytes": db_size,
             "log_file_size_bytes": log_size,
             "server_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "schema_version": get_db().schema_version(),
         }
     }
 
 
-# --- Autostart (Windows Registry Run key — most reliable) ---
-
-import winreg
-
-STARTUP_DIR = os.path.join(
-    os.environ.get("APPDATA", ""),
-    "Microsoft", "Windows", "Start Menu", "Programs", "Startup"
-)
-STARTUP_VBS = os.path.join(STARTUP_DIR, "PCTimeTracker.vbs")
-REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-REG_VALUE = "PCTimeTracker"
+# --- Autostart ---
 
 
 def _check_autostart_enabled() -> bool:
-    """Check if autostart is registered in Windows Registry."""
-    try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_KEY, 0, winreg.KEY_READ)
-        try:
-            value, _ = winreg.QueryValueEx(key, REG_VALUE)
-            return bool(value)
-        except FileNotFoundError:
-            return False
-        finally:
-            winreg.CloseKey(key)
-    except Exception:
-        return os.path.isfile(STARTUP_VBS)
+    from ..autostart import get_autostart_service
+
+    return get_autostart_service().is_enabled()
 
 
 @autostart_router.get("")
@@ -97,32 +72,19 @@ def get_autostart():
 
 @autostart_router.post("")
 def set_autostart(body: AutostartRequest):
-    """Enable/disable auto-start via Windows Registry Run key → VBS bridge.
-    VBS sets CWD before launching pythonw, solving the chicken-and-egg problem
-    where -m src.main needs the project dir as CWD before Python can import src."""
-    if body.enabled:
-        try:
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_KEY, 0, winreg.KEY_SET_VALUE)
-            cmd = os.path.join(PROJECT_DIR, "start_tracker.vbs")
-            winreg.SetValueEx(key, REG_VALUE, 0, winreg.REG_SZ, cmd)
-            winreg.CloseKey(key)
-            return {"data": {"enabled": True, "message": "已开启开机自启（注册表）。"}}
-        except Exception as e:
-            return {"data": {"enabled": False, "error": str(e)}}
-    else:
-        try:
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_KEY, 0, winreg.KEY_SET_VALUE)
-            try:
-                winreg.DeleteValue(key, REG_VALUE)
-            except FileNotFoundError:
-                pass
-            winreg.CloseKey(key)
-        except Exception:
-            pass
-        for f in [STARTUP_VBS, STARTUP_VBS.replace(".vbs", ".bat")]:
-            if os.path.isfile(f):
-                os.remove(f)
+    """Enable or disable the shared generated-launcher autostart service."""
+    from ..autostart import get_autostart_service
+
+    service = get_autostart_service()
+    try:
+        if body.enabled:
+            launcher = service.enable()
+            return {"data": {"enabled": True, "launcher": str(launcher),
+                             "message": "已开启开机自启。"}}
+        service.disable()
         return {"data": {"enabled": False, "message": "已关闭开机自启。"}}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"自启动配置失败: {exc}") from exc
 
 # --- Backup ---
 
@@ -143,7 +105,7 @@ def create_backup():
     from ..config import load_config
     from ..backup import backup_database
     config = load_config()
-    path = backup_database(config.database.path)
+    path = backup_database(config.database.path, keep=config.logging.backup_count)
     if path:
         return {"data": {"path": path, "message": "备份完成"}}
     return {"data": {"error": "备份失败——数据库不存在"}}

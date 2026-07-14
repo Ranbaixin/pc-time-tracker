@@ -8,10 +8,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
-from .config import load_config, AppConfig
+from .config import load_config
 from .database import init_db
 from .tracker import TrackerEngine
 from .dashboard import get_dashboard_html
+from .logging_setup import configure_logging
+from .runtime import clear_tracker, get_tracker as runtime_get_tracker, set_tracker
 
 from .routes import (
     sessions,
@@ -31,7 +33,7 @@ _tracker: TrackerEngine | None = None
 
 
 def get_tracker() -> TrackerEngine | None:
-    return _tracker
+    return runtime_get_tracker()
 
 
 @asynccontextmanager
@@ -45,33 +47,26 @@ async def lifespan(app: FastAPI):
     _base = Path(__file__).resolve().parent.parent
 
     # Setup logging
-    logging.basicConfig(
-        level=getattr(logging, config.logging.level, logging.INFO),
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler(str(_base / config.logging.file), encoding="utf-8"),
-        ],
-    )
+    configure_logging(config, base_dir=_base)
 
     # Initialize database
-    db = init_db(str(_base / config.database.path))
+    init_db(str(_base / config.database.path))
     logger.info(f"Database initialized: {config.database.path}")
 
     # Start tracker
     _tracker = TrackerEngine(config)
+    set_tracker(_tracker)
     _tracker.start()
     logger.info("Tracker engine started")
 
     # Wire tracker state to system routes
-    system.set_tracker_state(_tracker.state)
-
     yield
 
     # Shutdown
     if _tracker:
         _tracker.stop()
         logger.info("Tracker engine stopped")
+    clear_tracker()
 
 
 def create_app() -> FastAPI:
@@ -92,7 +87,7 @@ def create_app() -> FastAPI:
         CORSMiddleware,
         allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?$",
         allow_credentials=True,
-        allow_methods=["GET", "POST", "PUT"],
+        allow_methods=["GET", "POST", "PUT", "DELETE"],
         allow_headers=["Content-Type"],
     )
 
@@ -110,9 +105,10 @@ def create_app() -> FastAPI:
     app.include_router(system.browser_router, prefix="/api/v1")
 
     # Dashboard route
-    @app.get("/", response_class=HTMLResponse)
-    async def dashboard():
-        return get_dashboard_html()
+    if config.server.enable_dashboard:
+        @app.get("/", response_class=HTMLResponse)
+        async def dashboard():
+            return get_dashboard_html()
 
     logger.info("FastAPI app created with all routes registered")
     return app

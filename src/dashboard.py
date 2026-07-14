@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-from fastapi.responses import HTMLResponse
 
 
 _DASHBOARD_PATH = Path(__file__).resolve().parent.parent / "static" / "dashboard.html"

@@ -12,7 +12,7 @@ pip install -r requirements.txt
 python -m src.main run
 
 # 打开仪表盘
-# http://127.0.0.1:8080
+# http://127.0.0.1:8088
 ```
 
 ## CLI 命令
@@ -29,7 +29,7 @@ python -m src.main run
 
 ## API 端点
 
-Base URL: `http://127.0.0.1:8080/api/v1`
+Base URL: `http://127.0.0.1:8088/api/v1`
 
 - `GET /sessions` — 会话列表
 - `GET /sessions/current` — 当前会话
@@ -42,7 +42,7 @@ Base URL: `http://127.0.0.1:8080/api/v1`
 - `GET /config` / `PUT /config` — 配置
 - `GET /status` — 状态
 
-完整 API 文档: `http://127.0.0.1:8080/docs`
+完整 API 文档: `http://127.0.0.1:8088/docs`
 
 ## 配置
 

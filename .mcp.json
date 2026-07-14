@@ -4,7 +4,7 @@
       "command": "python",
       "args": ["-m", "mcp_server"],
       "env": {
-        "API_BASE_URL": "http://127.0.0.1:8080/api/v1"
+        "API_BASE_URL": "http://127.0.0.1:8088/api/v1"
       }
     }
   }

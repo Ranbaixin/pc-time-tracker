@@ -3,6 +3,7 @@
 import logging
 import sqlite3
 import threading
+from datetime import datetime
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
@@ -60,24 +61,48 @@ CREATE INDEX IF NOT EXISTS idx_wact_start      ON window_activity(start_time);
 CREATE INDEX IF NOT EXISTS idx_wact_range      ON window_activity(start_time, end_time);
 """
 
+LATEST_SCHEMA_VERSION = 2
+
+MIGRATION_V2_SQL = """
+CREATE INDEX IF NOT EXISTS idx_wact_end ON window_activity(end_time);
+CREATE INDEX IF NOT EXISTS idx_wact_source_range
+    ON window_activity(source, start_time, end_time);
+
+DROP TRIGGER IF EXISTS trg_one_open_timeline;
+CREATE TRIGGER trg_one_open_timeline
+BEFORE INSERT ON window_activity
+WHEN NEW.end_time IS NULL
+ AND COALESCE(NEW.source, 'desktop') IN ('desktop', 'system')
+ AND EXISTS (
+    SELECT 1 FROM window_activity
+    WHERE session_id = NEW.session_id
+      AND end_time IS NULL
+      AND COALESCE(source, 'desktop') IN ('desktop', 'system')
+ )
+BEGIN
+    SELECT RAISE(ABORT, 'only one open desktop/system activity is allowed per session');
+END;
+"""
+
 
 class Database:
     """Thread-safe SQLite connection manager."""
 
     def __init__(self, db_path: str):
         self.db_path = db_path
-        self._local = threading.local()
+        self._connections: set[sqlite3.Connection] = set()
+        self._connections_lock = threading.Lock()
 
     def _get_connection(self) -> sqlite3.Connection:
-        """Get or create a thread-local connection."""
-        if not hasattr(self._local, "conn") or self._local.conn is None:
-            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(self.db_path, timeout=5.0)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA foreign_keys=ON")
-            self._local.conn = conn
-        return self._local.conn
+        """Create a connection owned by one context-manager scope."""
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(self.db_path, timeout=5.0, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        with self._connections_lock:
+            self._connections.add(conn)
+        return conn
 
     @contextmanager
     def connect(self):
@@ -89,12 +114,58 @@ class Database:
         except Exception:
             conn.rollback()
             raise
+        finally:
+            conn.close()
+            with self._connections_lock:
+                self._connections.discard(conn)
 
     def init_schema(self):
         """Create tables and indexes if they don't exist; apply migrations."""
+        path = Path(self.db_path)
+        existed = path.exists() and path.stat().st_size > 0
         with self.connect() as conn:
+            had_legacy_schema = bool(
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='window_activity'"
+                ).fetchone()
+            )
             conn.executescript(SCHEMA_SQL)
             self._migrate(conn)
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS schema_migrations (
+                       version INTEGER PRIMARY KEY,
+                       applied_at TEXT NOT NULL
+                   )"""
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, ?)",
+                (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),),
+            )
+
+        with self.connect() as conn:
+            has_v2 = conn.execute(
+                "SELECT 1 FROM schema_migrations WHERE version = 2"
+            ).fetchone()
+        if not has_v2:
+            if existed and had_legacy_schema:
+                from .backup import backup_database
+
+                backup_database(
+                    self.db_path,
+                    path.parent / "backups",
+                    name_prefix="tracker-pre-migration-v2",
+                )
+            with self.connect() as conn:
+                conn.executescript(MIGRATION_V2_SQL)
+                conn.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (2, ?)",
+                    (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),),
+                )
+
+    def schema_version(self) -> int:
+        with self.connect() as conn:
+            row = conn.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()
+            return int(row[0])
 
     def _migrate(self, conn: sqlite3.Connection):
         """Apply column and table migrations safely (no IF NOT EXISTS in SQLite)."""
@@ -144,10 +215,12 @@ class Database:
         """)
 
     def close(self):
-        """Close the thread-local connection if open."""
-        if hasattr(self._local, "conn") and self._local.conn is not None:
-            self._local.conn.close()
-            self._local.conn = None
+        """Close any directly acquired or currently outstanding connections."""
+        with self._connections_lock:
+            connections = list(self._connections)
+            self._connections.clear()
+        for conn in connections:
+            conn.close()
 
 
 # Global singleton — initialized at startup
@@ -157,6 +230,8 @@ _db: Optional[Database] = None
 def init_db(db_path: str) -> Database:
     """Initialize the global database instance."""
     global _db
+    if _db is not None:
+        _db.close()
     _db = Database(db_path)
     _db.init_schema()
     return _db

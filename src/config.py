@@ -3,10 +3,11 @@
 import json
 import os
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # --- Config models ---
@@ -19,14 +20,17 @@ class TrackerConfig(BaseModel):
     sleep_gap_threshold_multiplier: float = Field(default=3.0, ge=1.5, le=10.0)
     ignore_windows_with_empty_title: bool = True
 
-    def validate_tracking_mode(self):
-        if self.tracking_mode not in ("foreground", "interactive"):
+    @field_validator("tracking_mode")
+    @classmethod
+    def validate_tracking_mode(cls, value: str) -> str:
+        if value not in ("foreground", "interactive"):
             raise ValueError("tracking_mode must be 'foreground' or 'interactive'")
+        return value
 
 
 class ServerConfig(BaseModel):
     host: str = "127.0.0.1"
-    port: int = Field(default=8080, ge=1024, le=65535)
+    port: int = Field(default=8088, ge=1024, le=65535)
     enable_dashboard: bool = True
     enable_swagger: bool = True
     browser_integration: bool = False
@@ -42,12 +46,20 @@ class LoggingConfig(BaseModel):
     max_size_mb: int = 10
     backup_count: int = 3
 
+    @field_validator("level")
+    @classmethod
+    def validate_level(cls, value: str) -> str:
+        normalized = value.upper()
+        if normalized not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+            raise ValueError("invalid logging level")
+        return normalized
+
 
 class AppConfig(BaseModel):
-    tracker: TrackerConfig = TrackerConfig()
-    server: ServerConfig = ServerConfig()
-    database: DatabaseConfig = DatabaseConfig()
-    logging: LoggingConfig = LoggingConfig()
+    tracker: TrackerConfig = Field(default_factory=TrackerConfig)
+    server: ServerConfig = Field(default_factory=ServerConfig)
+    database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
 
 # --- Config loader ---
@@ -113,8 +125,19 @@ def save_config(config: AppConfig, base_dir: Optional[Path] = None):
     _, user_path = get_config_paths(base_dir)
     user_path.parent.mkdir(parents=True, exist_ok=True)
     config_dict = json.loads(config.model_dump_json())
-    with open(user_path, "w", encoding="utf-8") as f:
-        json.dump(config_dict, f, indent=2, ensure_ascii=False)
+    fd, temp_name = tempfile.mkstemp(prefix="config-", suffix=".tmp", dir=user_path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(config_dict, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_name, user_path)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def _get_env_overrides() -> dict:

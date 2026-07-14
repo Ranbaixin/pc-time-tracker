@@ -2,18 +2,26 @@
 
 import atexit
 import logging
-import sys
 import threading
 import time
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Optional
 
-from .config import AppConfig, TrackerConfig
+from .config import AppConfig
 from .database import get_db
 from . import windows_api as win
 
 logger = logging.getLogger(__name__)
+
+TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+class SystemClock:
+    def now(self) -> datetime:
+        return datetime.now()
+
+    def monotonic(self) -> float:
+        return time.monotonic()
 
 
 class TrackerState:
@@ -146,24 +154,36 @@ class ActivityRecorder:
         self.config = config
         self._current_activity_id: Optional[int] = None
 
-    def start_activity(
+    def start_at(
         self, session_id: int, process_name: str, window_title: str,
-        process_path: Optional[str], tracking_mode: str,
+        process_path: Optional[str], tracking_mode: str, started_at: datetime,
+        source: str = "desktop",
     ) -> int:
         """Insert a new activity row. Closes any lingering open activity first."""
         # Safety: close any existing open activity before starting a new one
         if self._current_activity_id is not None:
-            self.close_activity()
+            self.close_at(started_at)
 
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = started_at.strftime(TIME_FORMAT)
 
         # Classify
         from .classifier import get_classifier
         clf = get_classifier()
-        info = clf.classify(process_name, window_title, process_path or "", "desktop")
+        info = clf.classify(process_name, window_title, process_path or "", source)
 
         db = get_db()
         with db.connect() as conn:
+            if source in {"desktop", "system"}:
+                conn.execute(
+                    """UPDATE window_activity
+                       SET end_time = CASE WHEN start_time > ? THEN start_time ELSE ? END,
+                           duration_seconds = MAX(0, CAST(
+                               strftime('%s', CASE WHEN start_time > ? THEN start_time ELSE ? END)
+                               - strftime('%s', start_time) AS INTEGER))
+                       WHERE session_id = ? AND end_time IS NULL
+                         AND COALESCE(source, 'desktop') IN ('desktop', 'system')""",
+                    (now, now, now, now, session_id),
+                )
             cursor = conn.execute(
                 """INSERT INTO window_activity
                    (session_id, window_title, process_name, process_path,
@@ -172,33 +192,37 @@ class ActivityRecorder:
                     file_type, content_type, keywords, source,
                     mem_peak_mb, is_fullscreen, battery_pct, power_plugged)
                    VALUES (?, ?, ?, ?, ?, ?, 0,
-                           ?, ?, ?, ?, ?, ?, ?, 'desktop', 0, 0, -1, 0)""",
+                           ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, -1, 0)""",
                 (session_id, window_title, process_name, process_path, now, tracking_mode,
                  info["category"], info["sub_category"], info["site_name"],
                  info["project_name"], info["file_type"], info["content_type"],
-                 info["keywords"]),
+                 info["keywords"], source),
             )
             self._current_activity_id = cursor.lastrowid
         return self._current_activity_id
 
-    def close_activity(self) -> Optional[dict]:
+    def close_at(self, ended_at: datetime) -> Optional[dict]:
         """Close the current open activity. Returns the closed row or None.
         Also verifies the activity exists and is still open to prevent duplicate closes."""
         if self._current_activity_id is None:
             return None
 
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = ended_at.strftime(TIME_FORMAT)
         db = get_db()
         with db.connect() as conn:
             # Verify row still exists and is open
             existing = conn.execute(
-                "SELECT id, end_time FROM window_activity WHERE id = ?",
+                "SELECT id, start_time, end_time FROM window_activity WHERE id = ?",
                 (self._current_activity_id,)
             ).fetchone()
             if not existing or existing["end_time"] is not None:
                 # Already closed or missing — don't double-close
                 self._current_activity_id = None
                 return None
+
+            start_dt = datetime.strptime(existing["start_time"], TIME_FORMAT)
+            if ended_at < start_dt:
+                now = existing["start_time"]
 
             conn.execute(
                 """UPDATE window_activity
@@ -215,6 +239,17 @@ class ActivityRecorder:
 
         self._current_activity_id = None
         return dict(row) if row else None
+
+    def start_activity(
+        self, session_id: int, process_name: str, window_title: str,
+        process_path: Optional[str], tracking_mode: str,
+    ) -> int:
+        return self.start_at(
+            session_id, process_name, window_title, process_path, tracking_mode, datetime.now()
+        )
+
+    def close_activity(self) -> Optional[dict]:
+        return self.close_at(datetime.now())
 
     def update_title(self, window_title: str):
         """Update the window title of the current activity without resetting timer."""
@@ -247,8 +282,11 @@ class ActivityRecorder:
 class TrackerEngine:
     """Main tracking engine — runs a polling loop in a background thread."""
 
-    def __init__(self, config: AppConfig):
+    def __init__(self, config: AppConfig, *, clock=None, windows=None):
         self.config = config
+        self._config_lock = threading.RLock()
+        self.clock = clock or SystemClock()
+        self.windows = windows or win
         self.state = TrackerState()
         self.session_mgr = SessionManager(config)
         self.activity_recorder = ActivityRecorder(config)
@@ -261,7 +299,9 @@ class TrackerEngine:
         self._previous_title: Optional[str] = None
         self._previous_idle_ticks: int = 0
         self._idle_since: Optional[str] = None
-        self._last_poll_real_time: Optional[float] = None  # for sleep detection
+        self._last_poll_monotonic: Optional[float] = None
+        self._last_poll_wall_time: Optional[datetime] = None
+        self._idle_active = False
 
     def start(self):
         """Start the tracker in a background thread."""
@@ -288,9 +328,16 @@ class TrackerEngine:
         """Signal the tracker to reload config on the next poll cycle."""
         self._reload_event.set()
 
+    def reload_config(self, config: AppConfig):
+        with self._config_lock:
+            self.config = config
+            self.session_mgr.config = config
+            self.activity_recorder.config = config
+        self.signal_reload()
+
     def _run(self):
         """Main polling loop (runs in background thread)."""
-        self.state.update(running=True, start_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        self.state.update(running=True, start_time=self.clock.now().strftime(TIME_FORMAT))
 
         # Register cleanup on exit
         atexit.register(self._cleanup)
@@ -311,99 +358,16 @@ class TrackerEngine:
                     logger.info("Config reload signaled")
 
                 # 1. Sleep detection
-                self._detect_sleep()
-
-                # 2. Check for active session (may have changed after sleep)
+                # 1. Check for active session
                 session = self.session_mgr.get_active_session()
                 if session is None:
                     session = self.session_mgr.ensure_session()
                 self.state.update(current_session_id=session["id"])
-
-                # 3. Idle detection
-                idle_ticks = win.get_last_input_ticks()
+                slept = self._detect_sleep(session["id"])
+                if slept:
+                    session = self.session_mgr.get_active_session() or self.session_mgr.ensure_session()
+                self._poll_once(session["id"])
                 tracker_cfg = self.config.tracker
-                idle_threshold_ms = tracker_cfg.idle_threshold_seconds * 1000
-
-                is_idle = (
-                    tracker_cfg.idle_detection_enabled
-                    and idle_ticks > idle_threshold_ms
-                )
-
-                self.state.update(is_idle=is_idle)
-
-                if is_idle:
-                    # User is idle — don't record activity
-                    if not self._previous_idle_ticks or self._previous_idle_ticks <= idle_threshold_ms:
-                        # Just became idle — close current activity
-                        self.activity_recorder.close_activity()
-                        self._previous_process = None
-                        self._previous_title = None
-                        self._idle_since = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-                    self._previous_idle_ticks = idle_ticks
-                    self._sleep_until_next_poll(t0, tracker_cfg.poll_interval_seconds)
-                    continue
-
-                # Reset idle tracking
-                self._previous_idle_ticks = idle_ticks
-                self._idle_since = None
-
-                # 4. Get foreground window info
-                hwnd = win.get_foreground_window()
-                title = win.get_window_text(hwnd) or ""
-
-                if tracker_cfg.ignore_windows_with_empty_title and not title.strip():
-                    title = "[No Title]"
-
-                pid = win.get_window_process_id(hwnd)
-                process_name = win.get_process_name(pid)
-
-                # 5. Detect window switch (compare by process_name only;
-                #    title changes within the same process just update the title)
-                if process_name != self._previous_process:
-                    # Different process — close previous, start new
-                    closed = self.activity_recorder.close_activity()
-                    if closed:
-                        dur = closed.get("duration_seconds", 0) or 0
-                        logger.debug(
-                            f"Closed: {closed['process_name']} "
-                            f"duration={dur}s interactions={closed.get('interaction_count', 0)}"
-                        )
-
-                    process_path = win.get_process_path(pid)
-                    self.activity_recorder.start_activity(
-                        session_id=session["id"],
-                        process_name=process_name,
-                        window_title=title,
-                        process_path=process_path,
-                        tracking_mode=tracker_cfg.tracking_mode,
-                    )
-
-                    self._previous_process = process_name
-                    self._previous_title = title
-                    self.state.update(
-                        current_window_title=title,
-                        current_process_name=process_name,
-                        current_activity_since=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    )
-                elif title != self._previous_title:
-                    # Same process, title changed — just update the title
-                    self.activity_recorder.update_title(title)
-                    self._previous_title = title
-                    self.state.update(current_window_title=title)
-
-                # 6. In interactive mode, track interaction count
-                if tracker_cfg.tracking_mode == "interactive":
-                    # If there was input activity in this poll interval, count it
-                    if idle_ticks < tracker_cfg.poll_interval_seconds * 1000:
-                        self.activity_recorder.increment_interaction()
-
-                # 7. Update state
-                self.state.update(
-                    last_poll_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    total_polls=self.state.total_polls + 1,
-                )
-
                 self._sleep_until_next_poll(t0, tracker_cfg.poll_interval_seconds)
 
             except Exception:
@@ -412,14 +376,88 @@ class TrackerEngine:
         # Clean shutdown
         self._shutdown()
 
-    def _detect_sleep(self):
-        """Detect if the system went to sleep since the last poll.
-        Also detects multi-day gaps (system shutdown/reboot) and cleans up stale activities."""
-        if self._last_poll_real_time is None:
-            self._last_poll_real_time = time.time()
+    def _poll_once(self, session_id: int):
+        now = self.clock.now()
+        tracker_cfg = self.config.tracker
+        idle_ticks = self.windows.get_last_input_ticks()
+        idle_threshold_ms = tracker_cfg.idle_threshold_seconds * 1000
+        is_idle = tracker_cfg.idle_detection_enabled and idle_ticks > idle_threshold_ms
+        self.state.update(is_idle=is_idle)
+
+        if is_idle:
+            if not self._idle_active:
+                idle_start = now - timedelta(milliseconds=idle_ticks)
+                self.activity_recorder.close_at(idle_start)
+                self.activity_recorder.start_at(
+                    session_id, "[System Idle]", "User idle", None,
+                    tracker_cfg.tracking_mode, idle_start, source="system",
+                )
+                self._idle_active = True
+                self._previous_process = None
+                self._previous_title = None
+                self._idle_since = idle_start.strftime(TIME_FORMAT)
+            self._previous_idle_ticks = idle_ticks
+            self._mark_poll(now)
             return
 
-        gap = time.time() - self._last_poll_real_time
+        if self._idle_active:
+            self.activity_recorder.close_at(now)
+            self._idle_active = False
+        self._previous_idle_ticks = idle_ticks
+        self._idle_since = None
+
+        hwnd = self.windows.get_foreground_window()
+        title = self.windows.get_window_text(hwnd) or ""
+        if not title.strip():
+            if tracker_cfg.ignore_windows_with_empty_title:
+                self.activity_recorder.close_at(now)
+                self._previous_process = None
+                self._previous_title = None
+                self._mark_poll(now)
+                return
+            title = "[No Title]"
+        pid = self.windows.get_window_process_id(hwnd)
+        process_name = self.windows.get_process_name(pid)
+
+        if process_name != self._previous_process or title != self._previous_title:
+            self.activity_recorder.close_at(now)
+            self.activity_recorder.start_at(
+                session_id, process_name, title, self.windows.get_process_path(pid),
+                tracker_cfg.tracking_mode, now,
+            )
+            self._previous_process = process_name
+            self._previous_title = title
+            self.state.update(
+                current_window_title=title,
+                current_process_name=process_name,
+                current_activity_since=now.strftime(TIME_FORMAT),
+            )
+        elif tracker_cfg.tracking_mode == "interactive" and (
+            idle_ticks < tracker_cfg.poll_interval_seconds * 1000
+        ):
+            self.activity_recorder.increment_interaction()
+        self._mark_poll(now)
+
+    def _mark_poll(self, now: datetime):
+        self._last_poll_wall_time = now
+        self._last_poll_monotonic = self.clock.monotonic()
+        snapshot = self.state.snapshot()
+        self.state.update(
+            last_poll_time=now.strftime(TIME_FORMAT),
+            total_polls=snapshot["total_polls"] + 1,
+        )
+
+    def _detect_sleep(self, session_id: int | None = None) -> bool:
+        """Detect if the system went to sleep since the last poll.
+        Also detects multi-day gaps (system shutdown/reboot) and cleans up stale activities."""
+        current_monotonic = self.clock.monotonic()
+        current_wall = self.clock.now()
+        if self._last_poll_monotonic is None or self._last_poll_wall_time is None:
+            self._last_poll_monotonic = current_monotonic
+            self._last_poll_wall_time = current_wall
+            return False
+
+        gap = current_monotonic - self._last_poll_monotonic
         threshold = (
             self.config.tracker.poll_interval_seconds
             * self.config.tracker.sleep_gap_threshold_multiplier
@@ -429,50 +467,33 @@ class TrackerEngine:
             logger.info(f"Gap detected — gap={gap:.0f}s threshold={threshold:.0f}s")
 
             # Close any lingering open activity
-            self.activity_recorder.close_activity()
+            sleep_start = self._last_poll_wall_time
+            self.activity_recorder.close_at(sleep_start)
             self._previous_process = None
             self._previous_title = None
-
-            # Also close ALL open activities for the current session
-            # (safety net for any edge case where multiple open rows exist)
-            session = self.session_mgr.get_active_session()
-            if session:
-                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                db = get_db()
-                with db.connect() as conn:
-                    conn.execute(
-                        """UPDATE window_activity
-                           SET end_time = ?,
-                               duration_seconds = CAST(
-                                   (strftime('%s', ?) - strftime('%s', start_time)) AS INTEGER
-                               )
-                           WHERE session_id = ? AND end_time IS NULL""",
-                        (now, now, session["id"]),
-                    )
-                logger.info("Closed all open activities for session %d", session["id"])
-
-            # Record a sleep marker
-            if session:
-                sleep_start = datetime.fromtimestamp(
-                    self._last_poll_real_time
-                ).strftime("%Y-%m-%d %H:%M:%S")
+            self._idle_active = False
+            if session_id is None:
+                session = self.session_mgr.get_active_session()
+                session_id = session["id"] if session else None
+            if session_id is not None:
                 db = get_db()
                 with db.connect() as conn:
                     conn.execute(
                         """INSERT INTO window_activity
                            (session_id, window_title, process_name, start_time, end_time,
-                            duration_seconds, tracking_mode)
+                            duration_seconds, tracking_mode, source)
                            VALUES (?, ?, '[System Sleep]', ?, ?,
                                CAST((strftime('%s', ?) - strftime('%s', ?)) AS INTEGER),
-                               ?)""",
-                        (session["id"], f"System sleep ({gap:.0f}s)", sleep_start, now,
-                         now, sleep_start, self.config.tracker.tracking_mode),
+                               ?, 'system')""",
+                        (session_id, f"System sleep ({gap:.0f}s)",
+                         sleep_start.strftime(TIME_FORMAT), current_wall.strftime(TIME_FORMAT),
+                         current_wall.strftime(TIME_FORMAT), sleep_start.strftime(TIME_FORMAT),
+                         self.config.tracker.tracking_mode),
                     )
-
-            # Re-validate session after wake
-            self.session_mgr.ensure_session()
-
-        self._last_poll_real_time = time.time()
+            self._last_poll_monotonic = current_monotonic
+            self._last_poll_wall_time = current_wall
+            return True
+        return False
 
     def _sleep_until_next_poll(self, t0: float, interval: float):
         """Sleep for the remaining time in this poll cycle."""
@@ -495,7 +516,9 @@ class TrackerEngine:
             # Auto-backup on clean shutdown
             try:
                 from .backup import backup_database
-                backup_database(self.config.database.path)
+                backup_database(
+                    self.config.database.path, keep=self.config.logging.backup_count
+                )
             except Exception:
                 pass
         except Exception:

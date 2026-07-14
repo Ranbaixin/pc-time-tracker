@@ -12,7 +12,6 @@ Classifies each activity record into:
 Performance: < 0.5ms per call. All hot paths use dict lookup or 'in' operator.
 """
 
-import os
 import re
 from typing import Optional
 

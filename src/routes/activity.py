@@ -1,6 +1,5 @@
 """Activity endpoints — /api/v1/activity/*"""
 
-from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Query
 

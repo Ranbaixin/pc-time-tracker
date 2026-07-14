@@ -1,12 +1,11 @@
 """Session endpoints — /api/v1/sessions/*"""
 
-import time
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Query
 
 from ..database import get_db
-from ..models import CurrentSession, ActiveWindow
+from ..statistics import activity_timeline
 
 router = APIRouter(prefix="/sessions", tags=["Sessions"])
 
@@ -101,33 +100,31 @@ def get_session(session_id: int):
         s = dict(session)
         s["is_active"] = bool(s["is_active"])
 
-        # Get activity summary for this session
-        activities = conn.execute(
-            """SELECT process_name,
-                      COUNT(*) as window_count,
-                      COALESCE(SUM(duration_seconds), 0) as total_seconds
-               FROM window_activity
-               WHERE session_id = ?
-               GROUP BY process_name
-               ORDER BY total_seconds DESC""",
-            (session_id,),
-        ).fetchall()
+        start = datetime.strptime(s["start_time"], "%Y-%m-%d %H:%M:%S")
+        end = datetime.strptime(s["end_time"], "%Y-%m-%d %H:%M:%S") if s["end_time"] else datetime.now()
 
-        total_time = sum(a["total_seconds"] for a in activities) if activities else 0
+    timeline = [x for x in activity_timeline(start, end, session_id=session_id) if not x.is_idle]
+    totals: dict[str, int] = {}
+    ids: dict[str, set[int]] = {}
+    for item in timeline:
+        totals[item.process_name] = totals.get(item.process_name, 0) + item.duration_seconds
+        ids.setdefault(item.process_name, set()).add(item.activity_id)
+    activities = sorted(totals.items(), key=lambda item: (-item[1], item[0]))
+    total_time = sum(totals.values())
 
-        return {
+    return {
             "data": {
                 "session": s,
                 "activity_breakdown": [
                     {
-                        "process_name": a["process_name"],
-                        "window_count": a["window_count"],
-                        "total_seconds": a["total_seconds"],
+                        "process_name": name,
+                        "window_count": len(ids[name]),
+                        "total_seconds": seconds,
                         "percentage": round(
-                            (a["total_seconds"] / total_time * 100) if total_time > 0 else 0, 1
+                            (seconds / total_time * 100) if total_time > 0 else 0, 1
                         ),
                     }
-                    for a in activities
+                    for name, seconds in activities
                 ],
                 "total_active_seconds": total_time,
             }

@@ -2,9 +2,6 @@
 
 import argparse
 import logging
-import os
-import signal
-import subprocess
 import sys
 import time
 from datetime import datetime
@@ -13,8 +10,6 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
-PYTHONW = sys.executable.replace("python.exe", "pythonw.exe")
-TASK_NAME = "PCTimeTracker"
 
 
 def cmd_run(args):
@@ -28,11 +23,11 @@ def cmd_run(args):
     # Create the app (this also starts the tracker via lifespan)
     app = create_app()
 
-    print(f"\n  PC Time Tracker starting...")
+    print("\n  PC Time Tracker starting...")
     print(f"  Dashboard: http://{config.server.host}:{config.server.port}")
     print(f"  API Docs:  http://{config.server.host}:{config.server.port}/docs")
     print(f"  Tracking mode: {config.tracker.tracking_mode}")
-    print(f"  Press Ctrl+C to stop\n")
+    print("  Press Ctrl+C to stop\n")
 
     uvicorn.run(
         app,
@@ -47,8 +42,10 @@ def cmd_track(args):
     from .config import load_config
     from .database import init_db
     from .tracker import TrackerEngine
+    from .logging_setup import configure_logging
 
     config = load_config()
+    configure_logging(config, base_dir=PROJECT_DIR)
     init_db(config.database.path)
 
     tracker = TrackerEngine(config)
@@ -56,7 +53,7 @@ def cmd_track(args):
 
     print(f"\n  Tracker running (mode: {config.tracker.tracking_mode})")
     print(f"  Poll interval: {config.tracker.poll_interval_seconds}s")
-    print(f"  Press Ctrl+C to stop\n")
+    print("  Press Ctrl+C to stop\n")
 
     try:
         while True:
@@ -72,8 +69,10 @@ def cmd_serve(args):
     import uvicorn
     from .config import load_config
     from .database import init_db
+    from .logging_setup import configure_logging
 
     config = load_config()
+    configure_logging(config, base_dir=PROJECT_DIR)
     init_db(config.database.path)
 
     # Create a minimal app without tracker lifespan
@@ -89,7 +88,7 @@ def cmd_serve(args):
         docs_url="/docs" if config.server.enable_swagger else None,
     )
     app.add_middleware(CORSMiddleware, allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?$",
-                       allow_credentials=True, allow_methods=["GET", "POST", "PUT"], allow_headers=["Content-Type"])
+                       allow_credentials=True, allow_methods=["GET", "POST", "PUT", "DELETE"], allow_headers=["Content-Type"])
     app.include_router(sessions.router, prefix="/api/v1")
     app.include_router(activity.router, prefix="/api/v1")
     app.include_router(stats.router, prefix="/api/v1")
@@ -102,14 +101,15 @@ def cmd_serve(args):
     app.include_router(classifications.router, prefix="/api/v1")
     app.include_router(system.browser_router, prefix="/api/v1")
 
-    @app.get("/", response_class=HTMLResponse)
-    async def dashboard():
-        return get_dashboard_html()
+    if config.server.enable_dashboard:
+        @app.get("/", response_class=HTMLResponse)
+        async def dashboard():
+            return get_dashboard_html()
 
-    print(f"\n  API server only (no tracking)")
+    print("\n  API server only (no tracking)")
     print(f"  Dashboard: http://{config.server.host}:{config.server.port}")
     print(f"  API Docs:  http://{config.server.host}:{config.server.port}/docs")
-    print(f"  Press Ctrl+C to stop\n")
+    print("  Press Ctrl+C to stop\n")
 
     uvicorn.run(app, host=config.server.host, port=config.server.port,
                 log_level=config.logging.level.lower())
@@ -122,36 +122,16 @@ def cmd_stats(args):
 
     config = load_config()
     init_db(config.database.path)
-    db = get_db()
     today = datetime.now().strftime("%Y-%m-%d")
+    from .routes.stats import get_summary
+
+    summary = get_summary(today)["data"]
+    total = summary["total_seconds"]
+    idle = summary["idle_seconds"]
+    top = summary["top_processes"]
+    db = get_db()
 
     with db.connect() as conn:
-        # Today summary
-        row = conn.execute(
-            """SELECT COALESCE(SUM(CASE WHEN process_name != '[System Sleep]'
-                                        THEN duration_seconds ELSE 0 END), 0) as total_seconds,
-                      COALESCE(SUM(CASE WHEN process_name = '[System Sleep]'
-                                        THEN duration_seconds ELSE 0 END), 0) as idle_seconds
-               FROM window_activity
-               WHERE date(start_time) = ? AND duration_seconds IS NOT NULL""",
-            (today,),
-        ).fetchone()
-
-        total = int(row["total_seconds"]) if row else 0
-        idle = int(row["idle_seconds"]) if row else 0
-
-        top = conn.execute(
-            """SELECT process_name,
-                      COALESCE(SUM(duration_seconds), 0) as total_seconds,
-                      COUNT(*) as window_count
-               FROM window_activity
-               WHERE date(start_time) = ?
-                 AND process_name NOT IN ('[System Sleep]', '<exited>', '[Protected]')
-                 AND duration_seconds IS NOT NULL
-               GROUP BY process_name ORDER BY total_seconds DESC LIMIT 10""",
-            (today,),
-        ).fetchall()
-
         # Recent sessions
         sessions = conn.execute(
             "SELECT * FROM sessions ORDER BY id DESC LIMIT 5"
@@ -167,14 +147,13 @@ def cmd_stats(args):
         im = (idle % 3600) // 60
         print(f"  空闲时间: {ih}h {im}min")
 
-    print(f"\n  Top 应用:")
+    print("\n  Top 应用:")
     for i, t in enumerate(top, 1):
         h = t["total_seconds"] // 3600
         m = (t["total_seconds"] % 3600) // 60
-        pct = round((t["total_seconds"] / total * 100) if total > 0 else 0, 1)
-        print(f"    {i}. {t['process_name']:<20s} {h}h {m}min ({pct}%)  — {t['window_count']} 次切换")
+        print(f"    {i}. {t['process_name']:<20s} {h}h {m}min ({t['percentage']}%)  — {t['window_count']} 次切换")
 
-    print(f"\n  最近会话:")
+    print("\n  最近会话:")
     for s in sessions:
         sd = dict(s)
         print(f"    #{sd['id']}: {sd['start_time']} -> {sd.get('end_time') or '进行中'}")
@@ -197,10 +176,10 @@ def cmd_backup(args):
     from .backup import backup_database, list_backups
 
     config = load_config()
-    path = backup_database(config.database.path)
+    path = backup_database(config.database.path, keep=config.logging.backup_count)
     if path:
         print(f"Backup created: {path}")
-        print(f"\nAll backups:")
+        print("\nAll backups:")
         for b in list_backups():
             size_kb = b['size_bytes'] / 1024
             print(f"  {b['name']}  ({size_kb:.1f} KB)  {b['created']}")
@@ -209,49 +188,29 @@ def cmd_backup(args):
 
 
 def cmd_install(args):
-    """Register Windows Task Scheduler for auto-start on login."""
-    main_script = str(PROJECT_DIR / "src" / "main.py")
+    """Register per-user auto-start through the shared service."""
+    from .autostart import get_autostart_service
 
-    cmd_parts = [
-        "schtasks", "/create",
-        "/tn", TASK_NAME,
-        "/tr", f'"{PYTHONW}" "{main_script}" run',
-        "/sc", "onlogon",
-        "/rl", "highest",
-        "/f",
-    ]
-
-    print(f"  注册开机自启任务...")
-    print(f"  任务名: {TASK_NAME}")
-    print(f"  命令: {PYTHONW} {main_script} run")
-
-    result = subprocess.run(cmd_parts, capture_output=True, text=True)
-
-    if result.returncode == 0:
-        print(f"  ✅ 已成功注册开机自启任务")
-        print(f"  提示: 下次登录时自动启动，Python 将以无窗口模式运行")
-        print(f"  仪表盘地址: http://127.0.0.1:8080")
-    else:
-        print(f"  ❌ 注册失败:")
-        print(f"  {result.stderr}")
-
-    if result.stdout:
-        print(f"  {result.stdout}")
+    try:
+        launcher = get_autostart_service().enable()
+        print("  已成功注册开机自启")
+        print(f"  启动器: {launcher}")
+        print("  仪表盘地址: http://127.0.0.1:8088")
+    except Exception as exc:
+        print(f"  注册失败: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
 
 
 def cmd_uninstall(args):
     """Remove Windows Task Scheduler task."""
-    result = subprocess.run(
-        ["schtasks", "/delete", "/tn", TASK_NAME, "/f"],
-        capture_output=True, text=True,
-    )
+    from .autostart import get_autostart_service
 
-    if result.returncode == 0:
-        print(f"  ✅ 已移除开机自启任务")
-    elif "不存在" in result.stderr or "does not exist" in result.stderr.lower():
-        print(f"  开机自启任务不存在（可能已移除）")
-    else:
-        print(f"  ❌ 移除失败: {result.stderr}")
+    try:
+        get_autostart_service().disable()
+        print("  已移除开机自启")
+    except Exception as exc:
+        print(f"  移除失败: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
 
 
 def main():
@@ -266,21 +225,21 @@ def main():
     )
     sub = parser.add_subparsers(dest="command", help="命令")
 
-    p_run = sub.add_parser("run", help="启动追踪 + API（主模式）")
+    sub.add_parser("run", help="启动追踪 + API（主模式）")
 
-    p_track = sub.add_parser("track", help="仅追踪（无 API）")
+    sub.add_parser("track", help="仅追踪（无 API）")
 
-    p_serve = sub.add_parser("serve", help="仅 API 服务（无追踪）")
+    sub.add_parser("serve", help="仅 API 服务（无追踪）")
 
-    p_stats = sub.add_parser("stats", help="终端快速统计")
+    sub.add_parser("stats", help="终端快速统计")
 
-    p_config = sub.add_parser("config", help="查看当前配置")
+    sub.add_parser("config", help="查看当前配置")
 
-    p_backup = sub.add_parser("backup", help="手动备份数据库")
+    sub.add_parser("backup", help="手动备份数据库")
 
-    p_install = sub.add_parser("install", help="注册开机自启（Windows Task Scheduler）")
+    sub.add_parser("install", help="注册开机自启")
 
-    p_uninstall = sub.add_parser("uninstall", help="移除开机自启任务")
+    sub.add_parser("uninstall", help="移除开机自启")
 
     args = parser.parse_args()
 

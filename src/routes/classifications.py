@@ -39,7 +39,7 @@ def add_rule(rule: ClassificationRule):
                  1 if rule.is_site else 0),
             )
         except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
+            raise HTTPException(status_code=400, detail=str(e)) from e
 
     # Reload classifier with new rules
     with db.connect() as conn:

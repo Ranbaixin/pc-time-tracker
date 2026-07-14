@@ -1,9 +1,7 @@
 """Database backup — copy tracker.db with timestamps, retain N copies."""
 
 import logging
-import os
-import shutil
-import glob
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -11,7 +9,12 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
-def backup_database(db_path: str, backup_dir: Optional[str] = None, keep: int = 30) -> Optional[str]:
+def backup_database(
+    db_path: str,
+    backup_dir: Optional[str] = None,
+    keep: int = 30,
+    name_prefix: str = "tracker",
+) -> Optional[str]:
     """
     Create a timestamped backup of the database file.
 
@@ -35,21 +38,36 @@ def backup_database(db_path: str, backup_dir: Optional[str] = None, keep: int = 
     backup_dir.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
-    backup_name = f"tracker-{timestamp}.db"
+    backup_name = f"{name_prefix}-{timestamp}.db"
     backup_path = backup_dir / backup_name
 
-    shutil.copy2(source, backup_path)
-    logger.info(f"Backup created: {backup_path} ({source.stat().st_size} bytes)")
+    source_conn = sqlite3.connect(str(source), timeout=10.0)
+    destination_conn = sqlite3.connect(str(backup_path))
+    try:
+        source_conn.backup(destination_conn)
+        result = destination_conn.execute("PRAGMA integrity_check").fetchone()
+        if not result or result[0] != "ok":
+            raise sqlite3.DatabaseError(f"backup integrity check failed: {result}")
+    except Exception:
+        destination_conn.close()
+        source_conn.close()
+        backup_path.unlink(missing_ok=True)
+        raise
+    else:
+        destination_conn.close()
+        source_conn.close()
+
+    logger.info("Backup created: %s (%d bytes)", backup_path, backup_path.stat().st_size)
 
     # Rotate old backups
-    _rotate_backups(backup_dir, keep)
+    _rotate_backups(backup_dir, keep, name_prefix)
 
     return str(backup_path)
 
 
-def _rotate_backups(backup_dir: Path, keep: int):
+def _rotate_backups(backup_dir: Path, keep: int, name_prefix: str = "tracker"):
     """Delete oldest backups beyond the keep limit."""
-    backups = sorted(backup_dir.glob("tracker-*.db"), reverse=True)
+    backups = sorted(backup_dir.glob(f"{name_prefix}-*.db"), reverse=True)
     for old in backups[keep:]:
         old.unlink()
         logger.debug(f"Removed old backup: {old.name}")

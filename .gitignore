@@ -3,7 +3,12 @@ __pycache__/
 data/tracker.db*
 logs/
 .env
+.coverage
+.pytest_cache/
 data/backups/
+data/config.json
+data/PCTimeTracker-autostart.vbs
+data/PCTimeTracker-autostart.tmp
 *.bak
 # autostart scripts (contain hardcoded local paths, not portable)
 *.vbs

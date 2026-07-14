@@ -1,7 +1,7 @@
 """Browser activity endpoint — receives data from Chrome/Edge extension."""
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
@@ -67,23 +67,34 @@ def receive_browser_activity(payload: BrowserBatch | BrowserSession):
             session_id = cursor.lastrowid
 
     inserted = 0
-    for sess in sessions:
+    errors = []
+    single = isinstance(payload, BrowserSession)
+    for index, sess in enumerate(sessions):
         try:
             # Map browser data to window_activity
-            duration_sec = max(0, int(sess.duration_ms / 1000))
+            if not 0 <= sess.duration_ms <= 86_400_000:
+                raise ValueError("duration_ms must be between 0 and 86400000")
+            duration_sec = int(sess.duration_ms / 1000)
+            now = datetime.now()
 
             # Convert epoch ms to ISO 8601
             if sess.start_time:
                 start_dt = datetime.fromtimestamp(sess.start_time / 1000)
-                start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+                if start_dt > now + timedelta(minutes=5):
+                    raise ValueError("start_time cannot be in the future")
             else:
-                start_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                start_dt = now - timedelta(milliseconds=sess.duration_ms)
 
-            if sess.end_time and sess.end_time > (sess.start_time or 0):
+            if sess.end_time:
                 end_dt = datetime.fromtimestamp(sess.end_time / 1000)
-                end_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+                if end_dt <= start_dt:
+                    raise ValueError("end_time must be after start_time")
+                if end_dt > now + timedelta(minutes=5):
+                    raise ValueError("end_time cannot be in the future")
             else:
-                end_str = start_str  # Will be updated later
+                end_dt = start_dt + timedelta(milliseconds=sess.duration_ms)
+            start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+            end_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
 
             process_name = f"[Browser] {sess.domain}"
             window_title = sess.title or sess.url
@@ -116,7 +127,16 @@ def receive_browser_activity(payload: BrowserBatch | BrowserSession):
                     ),
                 )
             inserted += 1
-        except Exception:
+        except ValueError as exc:
+            if single:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            errors.append({"index": index, "reason": str(exc)})
+        except Exception as exc:
             logger.exception(f"Failed to insert browser activity: {sess.domain}")
+            if single:
+                raise HTTPException(
+                    status_code=500, detail="Failed to store browser activity"
+                ) from exc
+            errors.append({"index": index, "reason": "storage failure"})
 
-    return {"data": {"received": len(sessions), "inserted": inserted}}
+    return {"data": {"received": len(sessions), "inserted": inserted, "errors": errors}}

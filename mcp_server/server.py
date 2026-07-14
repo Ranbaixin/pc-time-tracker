@@ -14,7 +14,7 @@ from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
 # --- Config ---
-API_BASE = os.environ.get("API_BASE_URL", "http://127.0.0.1:8080/api/v1")
+API_BASE = os.environ.get("API_BASE_URL", "http://127.0.0.1:8088/api/v1")
 HTTP_TIMEOUT = 10.0
 
 # --- MCP Server ---

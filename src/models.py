@@ -1,9 +1,8 @@
 """Shared data models — Pydantic schemas for API requests and responses."""
 
-from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 # --- DB row models (as returned from SQLite) ---

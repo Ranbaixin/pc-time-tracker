@@ -9,6 +9,15 @@ from fastapi import APIRouter, Query
 
 from ..database import get_db
 from ..config import load_config
+from .sessions import get_current_session
+from .stats import (
+    get_categories,
+    get_daily_stats,
+    get_keywords,
+    get_sites,
+    get_summary,
+    get_timeline,
+)
 
 router = APIRouter(prefix="/agent", tags=["Agent"])
 
@@ -47,163 +56,28 @@ def get_agent_context():
     Returns current session, today's summary, 7-day history, timeline,
     and a natural-language text summary ready for prompt injection.
     """
+    import os
+
     today = datetime.now().strftime("%Y-%m-%d")
     config = load_config()
     db = get_db()
-
+    current_session = get_current_session().get("data")
+    today_summary = get_summary(today)["data"]
+    last_7_days = get_daily_stats(days=7, date_from=None, date_to=None)["data"]["daily"]
+    timeline_today = get_timeline(today)["data"]["timeline"]
+    categories_today = get_categories(today)["data"]["categories"]
+    site_data = get_sites(today, 10)["data"]["sites"]
+    top_sites = [{"name": x["name"], "seconds": x["total_seconds"], "visits": x["visits"]}
+                 for x in site_data]
+    top_keywords = get_keywords(1, 20)["data"]["keywords"]
+    total_seconds = today_summary["total_seconds"]
+    idle_seconds = today_summary["idle_seconds"]
+    top_processes = today_summary["top_processes"]
+    text_summary = _generate_text_summary(today, total_seconds, idle_seconds, top_processes)
+    db_path = config.database.path
+    db_size = os.path.getsize(db_path) if os.path.exists(db_path) else 0
     with db.connect() as conn:
-        # Current session
-        session = conn.execute(
-            "SELECT * FROM sessions WHERE is_active = 1 ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-
-        current_session = None
-        if session:
-            s = dict(session)
-            start_dt = datetime.strptime(s["start_time"], "%Y-%m-%d %H:%M:%S")
-            elapsed = int((datetime.now() - start_dt).total_seconds())
-
-            current_activity = conn.execute(
-                """SELECT * FROM window_activity
-                   WHERE session_id = ? AND end_time IS NULL
-                   ORDER BY id DESC LIMIT 1""",
-                (s["id"],),
-            ).fetchone()
-
-            current_session = {
-                "id": s["id"],
-                "start_time": s["start_time"],
-                "elapsed_seconds": elapsed,
-                "active_window": {
-                    "process_name": current_activity["process_name"],
-                    "window_title": current_activity["window_title"],
-                    "since": current_activity["start_time"],
-                } if current_activity else None,
-            }
-
-        # Today summary
-        row = conn.execute(
-            """SELECT COALESCE(SUM(CASE WHEN process_name != '[System Sleep]'
-                                        THEN duration_seconds ELSE 0 END), 0) as total_seconds
-               FROM window_activity
-               WHERE date(start_time) = ? AND duration_seconds IS NOT NULL""",
-            (today,),
-        ).fetchone()
-
-        total_seconds = int(row["total_seconds"]) if row else 0
-
-        idle_row = conn.execute(
-            """SELECT COALESCE(SUM(duration_seconds), 0) as idle_seconds
-               FROM window_activity
-               WHERE (process_name = '[System Sleep]' OR window_title LIKE '%sleep%')
-                 AND date(start_time) = ? AND duration_seconds IS NOT NULL""",
-            (today,),
-        ).fetchone()
-        idle_seconds = int(idle_row["idle_seconds"]) if idle_row else 0
-
-        top = conn.execute(
-            """SELECT process_name, COUNT(*) as window_count,
-                      COALESCE(SUM(duration_seconds), 0) as total_seconds
-               FROM window_activity
-               WHERE process_name NOT IN ('[System Sleep]', '<exited>', '[Protected]')
-                 AND date(start_time) = ? AND duration_seconds IS NOT NULL
-               GROUP BY process_name ORDER BY total_seconds DESC LIMIT 10""",
-            (today,),
-        ).fetchall()
-
-        top_processes = []
-        for t in top:
-            pct = round((t["total_seconds"] / total_seconds * 100) if total_seconds > 0 else 0, 1)
-            top_processes.append({
-                "process_name": t["process_name"],
-                "total_seconds": int(t["total_seconds"]),
-                "percentage": pct,
-                "window_count": t["window_count"],
-            })
-
-        today_summary = {
-            "date": today,
-            "total_seconds": total_seconds,
-            "idle_seconds": idle_seconds,
-            "top_processes": top_processes,
-        }
-
-        # Last 7 days
-        date_from = (datetime.now() - timedelta(days=6)).strftime("%Y-%m-%d")
-        daily_rows = conn.execute(
-            """SELECT date(start_time) as date,
-                      COALESCE(SUM(CASE WHEN process_name != '[System Sleep]'
-                                        THEN duration_seconds ELSE 0 END), 0) as total_seconds
-               FROM window_activity
-               WHERE date(start_time) BETWEEN ? AND ?
-                 AND duration_seconds IS NOT NULL
-               GROUP BY date(start_time) ORDER BY date ASC""",
-            (date_from, today),
-        ).fetchall()
-
-        # Fill in missing days
-        daily_map = {r["date"]: int(r["total_seconds"]) for r in daily_rows}
-        last_7_days = []
-        for i in range(7):
-            d = (datetime.now() - timedelta(days=6 - i)).strftime("%Y-%m-%d")
-            last_7_days.append({
-                "date": d,
-                "total_seconds": daily_map.get(d, 0),
-            })
-
-        # Timeline today
-        hour_rows = conn.execute(
-            """SELECT CAST(strftime('%H', start_time) AS INTEGER) as hour,
-                      COALESCE(SUM(duration_seconds), 0) as active_seconds
-               FROM window_activity
-               WHERE date(start_time) = ? AND process_name != '[System Sleep]'
-                 AND duration_seconds IS NOT NULL
-               GROUP BY hour ORDER BY hour""",
-            (today,),
-        ).fetchall()
-
-        hour_map = {r["hour"]: int(r["active_seconds"]) for r in hour_rows}
-        timeline_today = [{"hour": h, "active_seconds": hour_map.get(h, 0)} for h in range(24)]
-
-        # DB metadata
-        import os
-        db_path = config.database.path
-        db_size = os.path.getsize(db_path) if os.path.exists(db_path) else 0
-
-        oldest = conn.execute(
-            "SELECT MIN(start_time) as ts FROM window_activity"
-        ).fetchone()
-
-        text_summary = _generate_text_summary(today, total_seconds, idle_seconds, top_processes)
-
-        # C7: Classification data
-        cat_rows = conn.execute(
-            """SELECT category, COALESCE(SUM(duration_seconds), 0) as total
-               FROM window_activity WHERE date(start_time) = ? AND category != ''
-               GROUP BY category ORDER BY total DESC""",
-            (today,),
-        ).fetchall()
-        categories_today = {r["category"]: int(r["total"]) for r in cat_rows}
-
-        site_rows = conn.execute(
-            """SELECT site_name, COALESCE(SUM(duration_seconds), 0) as total, COUNT(*) as visits
-               FROM window_activity WHERE date(start_time) = ? AND site_name != ''
-               GROUP BY site_name ORDER BY total DESC LIMIT 10""",
-            (today,),
-        ).fetchall()
-        top_sites = [{"name": r["site_name"], "seconds": int(r["total"]), "visits": r["visits"]} for r in site_rows]
-
-        keyword_rows = conn.execute(
-            """SELECT keywords FROM window_activity WHERE date(start_time) = ? AND keywords != ''""",
-            (today,),
-        ).fetchall()
-        kw_count: dict[str, int] = {}
-        for r in keyword_rows:
-            for w in (r["keywords"] or "").split(","):
-                w = w.strip()
-                if w:
-                    kw_count[w] = kw_count.get(w, 0) + 1
-        top_keywords = [{"word": w, "count": c} for w, c in sorted(kw_count.items(), key=lambda x: -x[1])[:20]]
+        oldest = conn.execute("SELECT MIN(start_time) as ts FROM window_activity").fetchone()
 
     return {
         "data": {
@@ -271,112 +145,38 @@ def get_insights():
 
     Returns patterns, anomalies, and trends.
     """
-    today = datetime.now().strftime("%Y-%m-%d")
-    db = get_db()
-    insights = []
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    date_from = (now - timedelta(days=29)).strftime("%Y-%m-%d")
+    daily = get_daily_stats(days=30, date_from=date_from, date_to=today)["data"]["daily"]
+    weekdays = [x["total_seconds"] for x in daily
+                if datetime.strptime(x["date"], "%Y-%m-%d").weekday() < 5]
+    weekends = [x["total_seconds"] for x in daily
+                if datetime.strptime(x["date"], "%Y-%m-%d").weekday() >= 5]
+    wd_avg = int(sum(weekdays) / len(weekdays)) if weekdays else 0
+    we_avg = int(sum(weekends) / len(weekends)) if weekends else 0
+    insights = [{
+        "key": "workday_vs_weekend", "label": "工作日 vs 周末",
+        "value": (f"工作日平均 {wd_avg // 3600}h{(wd_avg % 3600) // 60}min，"
+                  f"周末平均 {we_avg // 3600}h{(we_avg % 3600) // 60}min"),
+    }]
 
-    with db.connect() as conn:
-        # Workday vs weekend comparison
-        weekdays = conn.execute(
-            """SELECT COALESCE(AVG(daily_sec), 0) as avg_sec
-               FROM (
-                   SELECT date(start_time) as d,
-                          SUM(duration_seconds) as daily_sec
-                   FROM window_activity
-                   WHERE process_name != '[System Sleep]'
-                     AND duration_seconds IS NOT NULL
-                     AND CAST(strftime('%w', start_time) AS INTEGER) BETWEEN 1 AND 5
-                   GROUP BY date(start_time)
-               )""",
-        ).fetchone()
+    hour_totals = [0] * 24
+    for item in daily:
+        timeline = get_timeline(item["date"])["data"]["timeline"]
+        for hour in timeline:
+            hour_totals[hour["hour"]] += hour["active_seconds"]
+    peak_hours = sorted(range(24), key=lambda h: hour_totals[h], reverse=True)[:3]
+    if any(hour_totals):
+        insights.append({"key": "peak_hours", "label": "高峰时段",
+                         "value": "最活跃时段：" + "、".join(
+                             f"{hour}:00-{hour + 1}:00" for hour in peak_hours)})
 
-        weekends = conn.execute(
-            """SELECT COALESCE(AVG(daily_sec), 0) as avg_sec
-               FROM (
-                   SELECT date(start_time) as d,
-                          SUM(duration_seconds) as daily_sec
-                   FROM window_activity
-                   WHERE process_name != '[System Sleep]'
-                     AND duration_seconds IS NOT NULL
-                     AND CAST(strftime('%w', start_time) AS INTEGER) IN (0, 6)
-                   GROUP BY date(start_time)
-               )""",
-        ).fetchone()
-
-        wd_avg = int(weekdays["avg_sec"]) if weekdays else 0
-        we_avg = int(weekends["avg_sec"]) if weekends else 0
-
-        wd_h = wd_avg // 3600
-        wd_m = (wd_avg % 3600) // 60
-        we_h = we_avg // 3600
-        we_m = (we_avg % 3600) // 60
-
-        insights.append({
-            "key": "workday_vs_weekend",
-            "label": "工作日 vs 周末",
-            "value": f"工作日平均 {wd_h}h{wd_m}min，周末平均 {we_h}h{we_m}min",
-        })
-
-        # Peak hours
-        peak = conn.execute(
-            """SELECT CAST(strftime('%H', start_time) AS INTEGER) as hour,
-                      SUM(duration_seconds) as total_sec
-               FROM window_activity
-               WHERE process_name != '[System Sleep]'
-                 AND duration_seconds IS NOT NULL
-               GROUP BY hour
-               ORDER BY total_sec DESC
-               LIMIT 3""",
-        ).fetchall()
-
-        if peak:
-            peak_str = "、".join(
-                f"{p['hour']}:00-{p['hour']+1}:00" for p in peak
-            )
-            insights.append({
-                "key": "peak_hours",
-                "label": "高峰时段",
-                "value": f"最活跃时段：{peak_str}",
-            })
-
-        # Context switching frequency (window switches per hour)
-        avg_switches = conn.execute(
-            """SELECT COALESCE(
-                       CAST(COUNT(*) AS FLOAT) / NULLIF(COUNT(DISTINCT date(start_time)), 0),
-                       0
-                   ) as avg_per_day
-               FROM window_activity
-               WHERE process_name NOT IN ('[System Sleep]', '<exited>')
-                 AND duration_seconds IS NOT NULL""",
-        ).fetchone()
-
-        if avg_switches and avg_switches["avg_per_day"] > 0:
-            switches_per_day = int(avg_switches["avg_per_day"])
-            hourly_rate = switches_per_day / (wd_avg / 3600) if wd_avg > 0 else 0
-            insights.append({
-                "key": "context_switching",
-                "label": "窗口切换频率",
-                "value": f"日均切换 {switches_per_day} 次（活跃时约 {hourly_rate:.0f} 次/小时）",
-            })
-
-        # Today's comparison to average
-        today_sec = conn.execute(
-            """SELECT COALESCE(SUM(duration_seconds), 0) as s
-               FROM window_activity
-               WHERE date(start_time) = ? AND process_name != '[System Sleep]'
-                 AND duration_seconds IS NOT NULL""",
-            (today,),
-        ).fetchone()
-        today_total = int(today_sec["s"]) if today_sec else 0
-
-        if wd_avg > 0 and today_total > 0:
-            diff_pct = round((today_total - wd_avg) / wd_avg * 100)
-            direction = "高于" if diff_pct > 0 else "低于"
-            insights.append({
-                "key": "today_vs_average",
-                "label": "今日 vs 平均",
-                "value": f"今日使用时长{direction}平均水平 {abs(diff_pct)}%",
-            })
+    today_total = get_summary(today)["data"]["total_seconds"]
+    if wd_avg and today_total:
+        diff_pct = round((today_total - wd_avg) / wd_avg * 100)
+        insights.append({"key": "today_vs_average", "label": "今日 vs 平均",
+                         "value": f"今日使用时长{'高于' if diff_pct > 0 else '低于'}平均水平 {abs(diff_pct)}%"})
 
     return {
         "data": {
@@ -398,41 +198,10 @@ def get_prompt(
     Use this endpoint to get a ready-to-use prompt you can paste into any AI chat.
     """
     today = datetime.now().strftime("%Y-%m-%d")
-    db = get_db()
-
-    with db.connect() as conn:
-        # Gather data
-        today_row = conn.execute(
-            """SELECT COALESCE(SUM(CASE WHEN process_name != '[System Sleep]'
-                                        THEN duration_seconds ELSE 0 END), 0) as total_seconds
-               FROM window_activity
-               WHERE date(start_time) = ? AND duration_seconds IS NOT NULL""",
-            (today,),
-        ).fetchone()
-        total_seconds = int(today_row["total_seconds"]) if today_row else 0
-
-        top = conn.execute(
-            """SELECT process_name, SUM(duration_seconds) as total_seconds
-               FROM window_activity
-               WHERE date(start_time) = ?
-                 AND process_name NOT IN ('[System Sleep]', '<exited>', '[Protected]')
-                 AND duration_seconds IS NOT NULL
-               GROUP BY process_name ORDER BY total_seconds DESC LIMIT 10""",
-            (today,),
-        ).fetchall()
-
-        # 7 day data
-        date_from = (datetime.now() - timedelta(days=6)).strftime("%Y-%m-%d")
-        week = conn.execute(
-            """SELECT date(start_time) as date,
-                      COALESCE(SUM(CASE WHEN process_name != '[System Sleep]'
-                                        THEN duration_seconds ELSE 0 END), 0) as total_seconds
-               FROM window_activity
-               WHERE date(start_time) BETWEEN ? AND ?
-                 AND duration_seconds IS NOT NULL
-               GROUP BY date(start_time) ORDER BY date ASC""",
-            (date_from, today),
-        ).fetchall()
+    summary = get_summary(today)["data"]
+    total_seconds = summary["total_seconds"]
+    top = summary["top_processes"]
+    week = get_daily_stats(days=7, date_from=None, date_to=None)["data"]["daily"]
 
     # Build data string
     h = total_seconds // 3600

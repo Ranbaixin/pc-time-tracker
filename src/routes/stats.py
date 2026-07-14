@@ -1,89 +1,60 @@
-"""Statistics endpoints — /api/v1/stats/*"""
+"""Statistics endpoints backed by the normalized interval query layer."""
 
+from __future__ import annotations
+
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Query
 
-from ..database import get_db
+from ..statistics import activity_timeline, browser_timeline, day_bounds
 
 router = APIRouter(prefix="/stats", tags=["Statistics"])
 
 
 def _resolve_date(date_str: str) -> str:
-    """Resolve 'today' to actual ISO date."""
     if date_str and date_str.lower() == "today":
         return datetime.now().strftime("%Y-%m-%d")
     return date_str or datetime.now().strftime("%Y-%m-%d")
 
 
+def _active(items):
+    return [item for item in items if not item.is_idle]
+
+
+def _group_seconds(items, attribute: str):
+    totals: dict[str, int] = defaultdict(int)
+    ids: dict[str, set[int]] = defaultdict(set)
+    for item in items:
+        key = getattr(item, attribute) or ""
+        if key:
+            totals[key] += item.duration_seconds
+            ids[key].add(item.activity_id)
+    return totals, ids
+
+
 @router.get("/summary")
-def get_summary(
-    date: str = Query(default="today", description="Date in YYYY-MM-DD or 'today'"),
-):
-    """Get a single-day summary: active time, idle time, top processes."""
+def get_summary(date: str = Query(default="today", description="Date in YYYY-MM-DD or 'today'")):
     date = _resolve_date(date)
-    db = get_db()
-
-    with db.connect() as conn:
-        # Total active time (non-sleep, non-idle windows)
-        row = conn.execute(
-            """SELECT COALESCE(SUM(duration_seconds), 0) as total_seconds,
-                      COUNT(*) as window_count
-               FROM window_activity
-               WHERE process_name != '[System Sleep]'
-                 AND date(start_time) = ?
-                 AND duration_seconds IS NOT NULL""",
-            (date,),
-        ).fetchone()
-
-        total_seconds = min(int(row["total_seconds"]), 86400)
-        window_count = row["window_count"]
-
-        # Idle / sleep time
-        idle_row = conn.execute(
-            """SELECT COALESCE(SUM(duration_seconds), 0) as idle_seconds
-               FROM window_activity
-               WHERE (process_name = '[System Sleep]' OR window_title LIKE '%sleep%')
-                 AND date(start_time) = ?
-                 AND duration_seconds IS NOT NULL""",
-            (date,),
-        ).fetchone()
-        idle_seconds = int(idle_row["idle_seconds"])
-
-        # Top processes
-        top = conn.execute(
-            """SELECT process_name,
-                      COUNT(*) as window_count,
-                      COALESCE(SUM(duration_seconds), 0) as total_seconds
-               FROM window_activity
-               WHERE process_name NOT IN ('[System Sleep]', '<exited>', '[Protected]')
-                 AND date(start_time) = ?
-                 AND duration_seconds IS NOT NULL
-               GROUP BY process_name
-               ORDER BY total_seconds DESC
-               LIMIT 10""",
-            (date,),
-        ).fetchall()
-
-    top_processes = []
-    for t in top:
-        pct = round((t["total_seconds"] / total_seconds * 100) if total_seconds > 0 else 0, 1)
-        top_processes.append({
-            "process_name": t["process_name"],
-            "total_seconds": int(t["total_seconds"]),
-            "percentage": pct,
-            "window_count": t["window_count"],
-        })
-
-    return {
-        "data": {
-            "date": date,
-            "total_seconds": total_seconds,
-            "idle_seconds": idle_seconds,
-            "window_count": window_count,
-            "top_processes": top_processes,
-        }
-    }
+    start, end = day_bounds(date)
+    timeline = activity_timeline(start, end)
+    active = _active(timeline)
+    total_seconds = sum(x.duration_seconds for x in active)
+    idle_seconds = sum(x.duration_seconds for x in timeline if x.is_idle)
+    totals, ids = _group_seconds(active, "process_name")
+    top = sorted(totals.items(), key=lambda x: (-x[1], x[0]))[:10]
+    return {"data": {
+        "date": date,
+        "total_seconds": total_seconds,
+        "idle_seconds": idle_seconds,
+        "window_count": len({x.activity_id for x in active}),
+        "top_processes": [
+            {"process_name": name, "total_seconds": seconds,
+             "percentage": round(seconds / total_seconds * 100, 1) if total_seconds else 0,
+             "window_count": len(ids[name])}
+            for name, seconds in top
+        ],
+    }}
 
 
 @router.get("/daily")
@@ -92,65 +63,26 @@ def get_daily_stats(
     date_from: str = Query(default=None),
     date_to: str = Query(default=None),
 ):
-    """Get multi-day breakdown of usage."""
-    if date_from and date_to:
-        pass
-    else:
+    if not (date_from and date_to):
         date_to = datetime.now().strftime("%Y-%m-%d")
         date_from = (datetime.now() - timedelta(days=days - 1)).strftime("%Y-%m-%d")
-
-    db = get_db()
-    with db.connect() as conn:
-        rows = conn.execute(
-            """SELECT date(start_time) as date,
-                      COALESCE(SUM(CASE WHEN process_name != '[System Sleep]'
-                                        THEN duration_seconds ELSE 0 END), 0) as total_seconds,
-                      COALESCE(SUM(CASE WHEN process_name = '[System Sleep]'
-                                        THEN duration_seconds ELSE 0 END), 0) as idle_seconds
-               FROM window_activity
-               WHERE date(start_time) BETWEEN ? AND ?
-                 AND duration_seconds IS NOT NULL
-               GROUP BY date(start_time)
-               ORDER BY date ASC""",
-            (date_from, date_to),
-        ).fetchall()
-
-    # Build a dict of existing dates, then fill in all missing days with zeros
-    date_map = {r["date"]: {"total_seconds": int(r["total_seconds"]),
-                             "idle_seconds": int(r["idle_seconds"])} for r in rows}
-
-    daily_data = []
-    d = datetime.strptime(date_from, "%Y-%m-%d")
-    d_end = datetime.strptime(date_to, "%Y-%m-%d")
-    while d <= d_end:
-        ds = d.strftime("%Y-%m-%d")
-        info = date_map.get(ds, {"total_seconds": 0, "idle_seconds": 0})
-        capped = min(info["total_seconds"], 86400)
-        capped_idle = min(info["idle_seconds"], 86400)
-
-        # Get top process for this day (only if data exists)
-        top = None
-        if info["total_seconds"] > 0:
-            top = conn.execute(
-                """SELECT process_name, SUM(duration_seconds) as s
-                   FROM window_activity
-                   WHERE date(start_time) = ?
-                     AND process_name NOT IN ('[System Sleep]', '<exited>')
-                     AND duration_seconds IS NOT NULL
-                   GROUP BY process_name
-                   ORDER BY s DESC LIMIT 1""",
-                (ds,),
-            ).fetchone()
-
-        daily_data.append({
-            "date": ds,
-            "total_seconds": capped,
-            "idle_seconds": capped_idle,
-            "top_process": top["process_name"] if top else None,
+    current = datetime.strptime(date_from, "%Y-%m-%d")
+    last = datetime.strptime(date_to, "%Y-%m-%d")
+    result = []
+    while current <= last:
+        start, end = current, current + timedelta(days=1)
+        timeline = activity_timeline(start, end)
+        active = _active(timeline)
+        totals, _ = _group_seconds(active, "process_name")
+        top = max(totals, key=totals.get) if totals else None
+        result.append({
+            "date": current.strftime("%Y-%m-%d"),
+            "total_seconds": sum(x.duration_seconds for x in active),
+            "idle_seconds": sum(x.duration_seconds for x in timeline if x.is_idle),
+            "top_process": top,
         })
-        d += timedelta(days=1)
-
-    return {"data": {"daily": daily_data, "date_from": date_from, "date_to": date_to}}
+        current += timedelta(days=1)
+    return {"data": {"daily": result, "date_from": date_from, "date_to": date_to}}
 
 
 @router.get("/processes")
@@ -160,298 +92,111 @@ def get_top_processes(
     date_to: str = Query(default=None),
     limit: int = Query(default=10, ge=1, le=50),
 ):
-    """Get top-N processes by usage time."""
-    if date_from and date_to:
-        pass
-    else:
-        date = _resolve_date(date)
-        date_from = date
-        date_to = date
-
-    db = get_db()
-    with db.connect() as conn:
-        rows = conn.execute(
-            """SELECT process_name,
-                      COUNT(*) as window_count,
-                      COALESCE(SUM(duration_seconds), 0) as total_seconds
-               FROM window_activity
-               WHERE date(start_time) BETWEEN ? AND ?
-                 AND process_name NOT IN ('[System Sleep]', '<exited>', '[Protected]')
-                 AND duration_seconds IS NOT NULL
-               GROUP BY process_name
-               ORDER BY total_seconds DESC
-               LIMIT ?""",
-            (date_from, date_to, limit),
-        ).fetchall()
-
-    total = sum(r["total_seconds"] for r in rows)
-
-    return {
-        "data": {
-            "processes": [
-                {
-                    "process_name": r["process_name"],
-                    "total_seconds": int(r["total_seconds"]),
-                    "percentage": round(
-                        (r["total_seconds"] / total * 100) if total > 0 else 0, 1
-                    ),
-                    "window_count": r["window_count"],
-                }
-                for r in rows
-            ],
-            "date_from": date_from,
-            "date_to": date_to,
-        }
-    }
+    if not (date_from and date_to):
+        date_from = date_to = _resolve_date(date)
+    start = datetime.strptime(date_from, "%Y-%m-%d")
+    end = datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1)
+    active = _active(activity_timeline(start, end))
+    total = sum(x.duration_seconds for x in active)
+    totals, ids = _group_seconds(active, "process_name")
+    ordered = sorted(totals.items(), key=lambda x: (-x[1], x[0]))[:limit]
+    return {"data": {
+        "processes": [
+            {"process_name": name, "total_seconds": seconds,
+             "percentage": round(seconds / total * 100, 1) if total else 0,
+             "window_count": len(ids[name])}
+            for name, seconds in ordered
+        ],
+        "date_from": date_from, "date_to": date_to,
+    }}
 
 
 @router.get("/timeline")
-def get_timeline(
-    date: str = Query(default="today"),
-):
-    """Get hourly breakdown (24-element array) for a date.
-
-    Activities spanning multiple hours are proportionally distributed
-    so each hour maxes out at 3600 seconds (60 min).
-    """
+def get_timeline(date: str = Query(default="today")):
     date = _resolve_date(date)
-    db = get_db()
-
-    with db.connect() as conn:
-        # Fetch all non-sleep activities for the day
-        rows = conn.execute(
-            """SELECT start_time, end_time, duration_seconds, process_name
-               FROM window_activity
-               WHERE date(start_time) = ?
-                 AND process_name != '[System Sleep]'
-                 AND duration_seconds IS NOT NULL AND duration_seconds > 0""",
-            (date,),
-        ).fetchall()
-
-    # Initialize 24-hour buckets
-    hours = [{"hour": h, "active_seconds": 0, "process_times": {}} for h in range(24)]
-
-    for r in rows:
-        d = dict(r)
-        dur = int(d["duration_seconds"])
-        start_str = d["start_time"]
-        end_str = d.get("end_time") or start_str
-        proc = d["process_name"]
-
-        # Parse start and end times
-        try:
-            st = datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S")
-            et = datetime.strptime(end_str, "%Y-%m-%d %H:%M:%S")
-        except (ValueError, TypeError):
-            # If parsing fails, attribute to start hour
-            h = int(start_str[11:13]) if len(start_str) >= 13 else 0
-            hours[h]["active_seconds"] += dur
-            hours[h]["process_times"][proc] = hours[h]["process_times"].get(proc, 0) + dur
-            continue
-
-        # Distribute duration across hours proportionally
-        remaining = dur
-        current = st
-        while remaining > 0 and current < et:
-            h = current.hour
-            # End of this hour bucket
-            next_hour = current.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-            # How much of the remaining duration falls in this hour
-            until_end_of_hour = (next_hour - current).total_seconds()
-            # How much of the activity is left
-            activity_left = (et - current).total_seconds()
-            # Take the smaller of: remaining dur, until end of hour, activity left
-            segment = min(remaining, until_end_of_hour, activity_left)
-            segment = max(0, int(segment))
-
-            if segment > 0:
-                hours[h]["active_seconds"] += segment
-                hours[h]["process_times"][proc] = hours[h]["process_times"].get(proc, 0) + segment
-                remaining -= segment
-
-            current = next_hour
-
-    # Cap each hour at 3600
-    timeline = []
-    for h in hours:
-        sec = min(h["active_seconds"], 3600)
-        proc_times = h["process_times"]
-        top_proc = max(proc_times, key=proc_times.get) if proc_times else None
-        timeline.append({
-            "hour": h["hour"],
-            "active_seconds": sec,
-            "top_process": top_proc,
-        })
-
-    return {"data": {"date": date, "timeline": timeline}}
-
-
-# ── C5: New classification-aware endpoints ─────────────────────────────
+    start, end = day_bounds(date)
+    active = _active(activity_timeline(start, end))
+    hours = []
+    for hour in range(24):
+        hs = start + timedelta(hours=hour)
+        he = hs + timedelta(hours=1)
+        proc: dict[str, int] = defaultdict(int)
+        for item in active:
+            seconds = max(0, int((min(item.end, he) - max(item.start, hs)).total_seconds()))
+            if seconds:
+                proc[item.process_name] += seconds
+        total = sum(proc.values())
+        hours.append({"hour": hour, "active_seconds": total,
+                      "top_process": max(proc, key=proc.get) if proc else None})
+    return {"data": {"date": date, "timeline": hours}}
 
 
 @router.get("/categories")
-def get_categories(
-    date: str = Query(default="today"),
-):
-    """Get time distribution by category (开发/浏览/娱乐/社交/...) for a date."""
+def get_categories(date: str = Query(default="today")):
     date = _resolve_date(date)
-    db = get_db()
-    with db.connect() as conn:
-        rows = conn.execute(
-            """SELECT category, COALESCE(SUM(duration_seconds), 0) as total,
-                      COUNT(*) as cnt
-               FROM window_activity
-               WHERE date(start_time) = ? AND category != ''
-                 AND duration_seconds IS NOT NULL
-               GROUP BY category ORDER BY total DESC""",
-            (date,),
-        ).fetchall()
-
-        # Sub-category breakdown
-        sub_rows = conn.execute(
-            """SELECT sub_category, COALESCE(SUM(duration_seconds), 0) as total
-               FROM window_activity
-               WHERE date(start_time) = ? AND sub_category != ''
-                 AND duration_seconds IS NOT NULL
-               GROUP BY sub_category ORDER BY total DESC""",
-            (date,),
-        ).fetchall()
-
-    return {
-        "data": {
-            "date": date,
-            "categories": {r["category"]: int(r["total"]) for r in rows},
-            "sub_categories": {r["sub_category"]: int(r["total"]) for r in sub_rows},
-            "details": [{"category": r["category"], "total_seconds": int(r["total"]),
-                         "count": r["cnt"]} for r in rows],
-        }
-    }
+    start, end = day_bounds(date)
+    active = _active(activity_timeline(start, end))
+    categories, category_ids = _group_seconds(active, "category")
+    sub_categories, _ = _group_seconds(active, "sub_category")
+    ordered = sorted(categories.items(), key=lambda x: (-x[1], x[0]))
+    return {"data": {"date": date, "categories": dict(ordered),
+                     "sub_categories": dict(sorted(sub_categories.items(), key=lambda x: -x[1])),
+                     "details": [{"category": key, "total_seconds": value,
+                                  "count": len(category_ids[key])} for key, value in ordered]}}
 
 
 @router.get("/sites")
-def get_sites(
-    date: str = Query(default="today"),
-    limit: int = Query(default=20, ge=1, le=100),
-):
-    """Get browser site ranking by time for a date."""
+def get_sites(date: str = Query(default="today"), limit: int = Query(default=20, ge=1, le=100)):
     date = _resolve_date(date)
-    db = get_db()
-    with db.connect() as conn:
-        rows = conn.execute(
-            """SELECT site_name, COALESCE(SUM(duration_seconds), 0) as total_seconds,
-                      COUNT(*) as visits
-               FROM window_activity
-               WHERE date(start_time) = ? AND site_name != ''
-                 AND duration_seconds IS NOT NULL
-               GROUP BY site_name ORDER BY total_seconds DESC LIMIT ?""",
-            (date, limit),
-        ).fetchall()
-
-    total = sum(r["total_seconds"] for r in rows)
-    return {
-        "data": {
-            "date": date,
-            "sites": [
-                {
-                    "name": r["site_name"],
-                    "total_seconds": int(r["total_seconds"]),
-                    "percentage": round(r["total_seconds"] / total * 100, 1) if total > 0 else 0,
-                    "visits": r["visits"],
-                }
-                for r in rows
-            ],
-        }
-    }
+    start, end = day_bounds(date)
+    items = _active(browser_timeline(start, end))
+    totals, ids = _group_seconds(items, "site_name")
+    all_seconds = sum(totals.values())
+    ordered = sorted(totals.items(), key=lambda x: (-x[1], x[0]))[:limit]
+    return {"data": {"date": date, "sites": [
+        {"name": name, "total_seconds": seconds,
+         "percentage": round(seconds / all_seconds * 100, 1) if all_seconds else 0,
+         "visits": len(ids[name])}
+        for name, seconds in ordered
+    ]}}
 
 
 @router.get("/keywords")
-def get_keywords(
-    days: int = Query(default=7, ge=1, le=90),
-    limit: int = Query(default=50, ge=1, le=200),
-):
-    """Get top keywords from window titles over N days."""
-    today = datetime.now().strftime("%Y-%m-%d")
-    date_from = (datetime.now() - timedelta(days=days - 1)).strftime("%Y-%m-%d")
-    db = get_db()
-    with db.connect() as conn:
-        rows = conn.execute(
-            """SELECT keywords FROM window_activity
-               WHERE date(start_time) BETWEEN ? AND ?
-                 AND keywords != ''""",
-            (date_from, today),
-        ).fetchall()
+def get_keywords(days: int = Query(default=7, ge=1, le=90),
+                 limit: int = Query(default=50, ge=1, le=200)):
+    end = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    start = end - timedelta(days=days)
+    words = Counter()
+    seen: set[tuple[int, str]] = set()
+    for item in _active(browser_timeline(start, end)):
+        for word in filter(None, (x.strip() for x in item.keywords.split(","))):
+            marker = (item.activity_id, word)
+            if marker not in seen:
+                words[word] += 1
+                seen.add(marker)
+    return {"data": {"days": days, "keywords": [
+        {"word": word, "count": count} for word, count in words.most_common(limit)
+    ]}}
 
-    word_count: dict[str, int] = {}
-    for r in rows:
-        for word in (r["keywords"] or "").split(","):
-            word = word.strip()
-            if word:
-                word_count[word] = word_count.get(word, 0) + 1
 
-    sorted_words = sorted(word_count.items(), key=lambda x: -x[1])[:limit]
-    return {
-        "data": {
-            "days": days,
-            "keywords": [{"word": w, "count": c} for w, c in sorted_words],
-        }
-    }
+def _dimension_response(date: str, attribute: str, output_key: str):
+    resolved = _resolve_date(date)
+    start, end = day_bounds(resolved)
+    items = _active(browser_timeline(start, end) if attribute == "content_type"
+                    else activity_timeline(start, end))
+    totals, ids = _group_seconds(items, attribute)
+    ordered = sorted(totals.items(), key=lambda x: (-x[1], x[0]))
+    return {"data": {"date": resolved, output_key: [
+        {"type": name, "total_seconds": seconds, "count": len(ids[name])}
+        for name, seconds in ordered
+    ]}}
 
 
 @router.get("/content_types")
-def get_content_types(
-    date: str = Query(default="today"),
-):
-    """Get content type distribution (视频/文章/代码/...) for a date."""
-    date = _resolve_date(date)
-    db = get_db()
-    with db.connect() as conn:
-        rows = conn.execute(
-            """SELECT content_type, COALESCE(SUM(duration_seconds), 0) as total_seconds,
-                      COUNT(*) as cnt
-               FROM window_activity
-               WHERE date(start_time) = ? AND content_type != ''
-                 AND duration_seconds IS NOT NULL
-               GROUP BY content_type ORDER BY total_seconds DESC""",
-            (date,),
-        ).fetchall()
-
-    return {
-        "data": {
-            "date": date,
-            "types": [
-                {"type": r["content_type"], "total_seconds": int(r["total_seconds"]),
-                 "count": r["cnt"]}
-                for r in rows
-            ],
-        }
-    }
+def get_content_types(date: str = Query(default="today")):
+    return _dimension_response(date, "content_type", "types")
 
 
 @router.get("/file_types")
-def get_file_types(
-    date: str = Query(default="today"),
-):
-    """Get file type usage (Python/JavaScript/Markdown/...) for a date."""
-    date = _resolve_date(date)
-    db = get_db()
-    with db.connect() as conn:
-        rows = conn.execute(
-            """SELECT file_type, COUNT(*) as cnt,
-                      COALESCE(SUM(duration_seconds), 0) as total_seconds
-               FROM window_activity
-               WHERE date(start_time) = ? AND file_type != ''
-                 AND duration_seconds IS NOT NULL
-               GROUP BY file_type ORDER BY total_seconds DESC""",
-            (date,),
-        ).fetchall()
-
-    return {
-        "data": {
-            "date": date,
-            "file_types": [
-                {"type": r["file_type"], "total_seconds": int(r["total_seconds"]),
-                 "count": r["cnt"]}
-                for r in rows
-            ],
-        }
-    }
+def get_file_types(date: str = Query(default="today")):
+    return _dimension_response(date, "file_type", "file_types")
