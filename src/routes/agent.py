@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Query
 
 from ..database import get_db
+from ..collection import get_collection_quality
 from ..config import load_config
 from .sessions import get_current_session
 from .stats import (
@@ -58,10 +59,18 @@ def get_agent_context():
     """
     import os
 
-    today = datetime.now().strftime("%Y-%m-%d")
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
     config = load_config()
     db = get_db()
+    quality = get_collection_quality(now)
     current_session = get_current_session().get("data")
+    current_session_is_live = bool(
+        current_session and quality["freshness"] == "fresh"
+        and current_session["id"] == quality["last_session_id"]
+    )
+    if current_session and not current_session_is_live:
+        current_session["active_window"] = None
     today_summary = get_summary(today)["data"]
     last_7_days = get_daily_stats(days=7, date_from=None, date_to=None)["data"]["daily"]
     timeline_today = get_timeline(today)["data"]["timeline"]
@@ -74,6 +83,15 @@ def get_agent_context():
     idle_seconds = today_summary["idle_seconds"]
     top_processes = today_summary["top_processes"]
     text_summary = _generate_text_summary(today, total_seconds, idle_seconds, top_processes)
+    if any(window["status"] != "complete" for window in quality["coverage"].values()) or (
+        not current_session_is_live
+    ):
+        text_summary += (
+            "\n数据可信度提示：采集状态=" + quality["collection_status"]
+            + "；今日覆盖=" + quality["coverage"]["today"]["status"]
+            + "；七日覆盖=" + quality["coverage"]["last_7_days"]["status"]
+            + "。统计仅代表已记录数据；未覆盖区间不能解释为休息，开放历史记录可能延长统计。"
+        )
     db_path = config.database.path
     db_size = os.path.getsize(db_path) if os.path.exists(db_path) else 0
     with db.connect() as conn:
@@ -93,7 +111,9 @@ def get_agent_context():
             "_metadata": {
                 "db_size_bytes": db_size,
                 "oldest_record": oldest["ts"] if oldest else None,
-                "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "generated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+                "collection_quality": quality,
+                "current_session_is_live": current_session_is_live,
             },
         }
     }

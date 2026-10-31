@@ -9,6 +9,7 @@ from typing import Optional
 
 from .config import AppConfig
 from .database import get_db
+from .collection import CollectionRecorder
 from . import windows_api as win
 
 logger = logging.getLogger(__name__)
@@ -286,6 +287,7 @@ class TrackerEngine:
         self.config = config
         self._config_lock = threading.RLock()
         self.clock = clock or SystemClock()
+        self.collection = CollectionRecorder(self.clock)
         self.windows = windows or win
         self.state = TrackerState()
         self.session_mgr = SessionManager(config)
@@ -372,6 +374,7 @@ class TrackerEngine:
 
             except Exception:
                 logger.exception("Error in tracker loop — continuing")
+                self.collection.interrupt()
 
         # Clean shutdown
         self._shutdown()
@@ -397,7 +400,7 @@ class TrackerEngine:
                 self._previous_title = None
                 self._idle_since = idle_start.strftime(TIME_FORMAT)
             self._previous_idle_ticks = idle_ticks
-            self._mark_poll(now)
+            self._mark_poll(now, session_id, "idle")
             return
 
         if self._idle_active:
@@ -413,7 +416,7 @@ class TrackerEngine:
                 self.activity_recorder.close_at(now)
                 self._previous_process = None
                 self._previous_title = None
-                self._mark_poll(now)
+                self._mark_poll(now, session_id, "filtered")
                 return
             title = "[No Title]"
         pid = self.windows.get_window_process_id(hwnd)
@@ -436,9 +439,14 @@ class TrackerEngine:
             idle_ticks < tracker_cfg.poll_interval_seconds * 1000
         ):
             self.activity_recorder.increment_interaction()
-        self._mark_poll(now)
+        self._mark_poll(now, session_id, "active")
 
-    def _mark_poll(self, now: datetime):
+    def _mark_poll(self, now: datetime, session_id: int, observation: str):
+        cfg = self.config.tracker
+        self.collection.record(
+            now, session_id, observation,
+            cfg.poll_interval_seconds * cfg.sleep_gap_threshold_multiplier,
+        )
         self._last_poll_wall_time = now
         self._last_poll_monotonic = self.clock.monotonic()
         snapshot = self.state.snapshot()
@@ -509,6 +517,7 @@ class TrackerEngine:
     def _shutdown(self):
         """Clean shutdown: close activity, session, and backup database."""
         try:
+            self.collection.interrupt()
             self.activity_recorder.close_activity()
             session = self.session_mgr.get_active_session()
             if session:
