@@ -1,6 +1,6 @@
 # Browser reliable synchronization
 
-Schema v4 adds a durable receipt table with a unique event_id. Receipt and activity insert commit in the same transaction. Repeated IDs with identical payload are acknowledged as duplicate; changed payload is rejected. Old clients without IDs remain supported without deduplication guarantees. Keep IDs globally unique (UUID) and retain the original payload, including timestamps, on retries.
+Schema v8 adds a durable receipt table with a unique event_id. Receipt and activity insert commit in the same transaction. Repeated IDs with identical payload are acknowledged as duplicate; changed payload is rejected. Old clients without IDs remain supported without deduplication guarantees. Keep IDs globally unique (UUID) and retain the original payload, including timestamps, on retries.
 
 Batch sessions are validated independently. data.acknowledgements contains index, event_id and status: inserted / duplicate / rejected / retry. Only inserted and duplicate confirm durable receipt. Errors retain their existing index/reason fields. Rejected events require user or client correction; never blindly discard them.
 
@@ -10,3 +10,5 @@ This repository contains no extension source; actual capture, alarm scheduling, 
 
 Validation on Windows 2026-10-31: pytest 66 passed, Ruff passed; Node queue tests 2 passed. Real lock/sleep/wake/reboot and actual extension integration remain pending. Issue #1 must stay open until those acceptance steps are completed. Desktop remains the duration authority; browser rows enrich content only.
 
+
+Migration numbers 7/8 reserve 3–6 for existing local AI-report migrations.

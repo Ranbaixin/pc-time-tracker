@@ -61,7 +61,7 @@ CREATE INDEX IF NOT EXISTS idx_wact_start      ON window_activity(start_time);
 CREATE INDEX IF NOT EXISTS idx_wact_range      ON window_activity(start_time, end_time);
 """
 
-LATEST_SCHEMA_VERSION = 4
+LATEST_SCHEMA_VERSION = 8
 
 MIGRATION_V2_SQL = """
 CREATE INDEX IF NOT EXISTS idx_wact_end ON window_activity(end_time);
@@ -85,7 +85,7 @@ END;
 """
 
 
-MIGRATION_V3_SQL = """
+MIGRATION_V7_SQL = """
 CREATE TABLE IF NOT EXISTS collection_periods (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id INTEGER NOT NULL,
@@ -178,34 +178,34 @@ class Database:
                 )
 
         with self.connect() as conn:
-            has_v3 = conn.execute(
-                "SELECT 1 FROM schema_migrations WHERE version = 3"
+            has_v7 = conn.execute(
+                "SELECT 1 FROM schema_migrations WHERE version = 7"
             ).fetchone()
-        if not has_v3:
+        if not has_v7:
             if existed and had_legacy_schema:
                 from .backup import backup_database
 
                 backup_database(
                     self.db_path, path.parent / "backups",
-                    name_prefix="tracker-pre-migration-v3",
+                    name_prefix="tracker-pre-migration-v7",
                 )
             with self.connect() as conn:
-                conn.executescript(MIGRATION_V3_SQL)
+                conn.executescript(MIGRATION_V7_SQL)
                 conn.execute(
-                    "INSERT INTO schema_migrations(version, applied_at) VALUES (3, ?)",
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (7, ?)",
                     (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),),
                 )
 
         with self.connect() as conn:
-            has_v4 = conn.execute("SELECT 1 FROM schema_migrations WHERE version = 4").fetchone()
-        if not has_v4:
+            has_v8 = conn.execute("SELECT 1 FROM schema_migrations WHERE version = 8").fetchone()
+        if not has_v8:
             if existed and had_legacy_schema:
                 from .backup import backup_database
                 backup_database(self.db_path, path.parent / "backups",
-                                name_prefix="tracker-pre-migration-v4")
+                                name_prefix="tracker-pre-migration-v8")
             with self.connect() as conn:
                 conn.execute("CREATE TABLE IF NOT EXISTS browser_receipts (event_id TEXT PRIMARY KEY, payload_hash TEXT NOT NULL)")
-                conn.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (4, ?)",
+                conn.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (8, ?)",
                              (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),))
 
     def schema_version(self) -> int:

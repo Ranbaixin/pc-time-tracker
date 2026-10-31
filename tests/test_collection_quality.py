@@ -175,14 +175,14 @@ def test_v2_migration_preserves_history_and_does_not_backfill_samples(tmp_path):
                         VALUES (1, 'old.exe', '2020-01-01 00:00:00')''')
         original = tuple(conn.execute('SELECT * FROM window_activity').fetchone())
         conn.execute('DROP TABLE collection_periods')
-        conn.execute('DELETE FROM schema_migrations WHERE version = 3')
+        conn.execute('DELETE FROM schema_migrations WHERE version = 7')
     db.init_schema()
     db.init_schema()
-    assert db.schema_version() == 4
+    assert db.schema_version() == 8
     with db.connect() as conn:
         assert tuple(conn.execute('SELECT * FROM window_activity').fetchone()) == original
         assert conn.execute('SELECT COUNT(*) FROM collection_periods').fetchone()[0] == 0
-    assert len(list((tmp_path / 'backups').glob('tracker-pre-migration-v3-*.db'))) == 1
+    assert len(list((tmp_path / 'backups').glob('tracker-pre-migration-v7-*.db'))) == 1
 
 
 def test_clean_stop_is_not_a_successful_poll(tmp_path, fake_clock):
@@ -236,3 +236,4 @@ def test_adjacent_periods_merge_only_for_coverage_reporting(tmp_path, fake_clock
     result = quality(fake_clock)
     assert result['coverage']['today']['covered_seconds'] == 10
     assert len(result['coverage']['today']['observed_intervals']) == 1
+
