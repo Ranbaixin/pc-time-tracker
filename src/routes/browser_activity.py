@@ -1,8 +1,10 @@
 """Browser activity endpoint — receives data from Chrome/Edge extension."""
 
 import logging
+import hashlib
+import json
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -18,6 +20,7 @@ router = APIRouter(prefix="/activity/browser", tags=["Browser Activity"])
 
 class BrowserSession(BaseModel):
     """Single browser session sent by the extension."""
+    event_id: Optional[str] = Field(default=None, min_length=1, max_length=128)
     url: str
     domain: str
     title: str = ""
@@ -28,7 +31,7 @@ class BrowserSession(BaseModel):
 
 class BrowserBatch(BaseModel):
     """Batch of browser sessions (sent every ~30s or on tab switch)."""
-    sessions: list[BrowserSession] = Field(default_factory=list)
+    sessions: list[Any] = Field(default_factory=list)
 
 
 @router.post("")
@@ -68,9 +71,18 @@ def receive_browser_activity(payload: BrowserBatch | BrowserSession):
 
     inserted = 0
     errors = []
+    acknowledgements = []
     single = isinstance(payload, BrowserSession)
     for index, sess in enumerate(sessions):
+        event_id = sess.get("event_id") if isinstance(sess, dict) else getattr(sess, "event_id", None)
+        if not isinstance(event_id, str) or len(event_id) > 128:
+            event_id = None
         try:
+            if not isinstance(sess, BrowserSession):
+                sess = BrowserSession.model_validate(sess)
+            fingerprint = hashlib.sha256(json.dumps(
+                sess.model_dump(exclude={"event_id"}), sort_keys=True, allow_nan=False
+            ).encode()).hexdigest()
             # Map browser data to window_activity
             if not 0 <= sess.duration_ms <= 86_400_000:
                 raise ValueError("duration_ms must be between 0 and 86400000")
@@ -109,6 +121,20 @@ def receive_browser_activity(payload: BrowserBatch | BrowserSession):
                 info["site_name"] = sess.domain
 
             with db.connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                if sess.event_id:
+                    receipt = conn.execute(
+                        "SELECT payload_hash FROM browser_receipts WHERE event_id = ?",
+                        (sess.event_id,),
+                    ).fetchone()
+                    if receipt:
+                        if receipt[0] != fingerprint:
+                            raise ValueError("event_id reused with different payload")
+                        acknowledgements.append({"index": index, "event_id": sess.event_id,
+                                                 "status": "duplicate"})
+                        continue
+                    conn.execute("INSERT INTO browser_receipts VALUES (?, ?)",
+                                 (sess.event_id, fingerprint))
                 conn.execute(
                     """INSERT INTO window_activity
                        (session_id, window_title, process_name, process_path,
@@ -127,16 +153,20 @@ def receive_browser_activity(payload: BrowserBatch | BrowserSession):
                     ),
                 )
             inserted += 1
+            acknowledgements.append({"index": index, "event_id": sess.event_id,
+                                     "status": "inserted"})
         except ValueError as exc:
             if single:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
             errors.append({"index": index, "reason": str(exc)})
+            acknowledgements.append({"index": index, "event_id": event_id, "status": "rejected"})
         except Exception as exc:
-            logger.exception(f"Failed to insert browser activity: {sess.domain}")
+            logger.exception("Failed to insert browser activity")
             if single:
                 raise HTTPException(
                     status_code=500, detail="Failed to store browser activity"
                 ) from exc
             errors.append({"index": index, "reason": "storage failure"})
+            acknowledgements.append({"index": index, "event_id": event_id, "status": "retry"})
 
-    return {"data": {"received": len(sessions), "inserted": inserted, "errors": errors}}
+    return {"data": {"received": len(sessions), "inserted": inserted, "errors": errors, "acknowledgements": acknowledgements}}

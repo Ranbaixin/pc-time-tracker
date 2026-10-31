@@ -178,7 +178,7 @@ def test_v2_migration_preserves_history_and_does_not_backfill_samples(tmp_path):
         conn.execute('DELETE FROM schema_migrations WHERE version = 3')
     db.init_schema()
     db.init_schema()
-    assert db.schema_version() == 3
+    assert db.schema_version() == 4
     with db.connect() as conn:
         assert tuple(conn.execute('SELECT * FROM window_activity').fetchone()) == original
         assert conn.execute('SELECT COUNT(*) FROM collection_periods').fetchone()[0] == 0
