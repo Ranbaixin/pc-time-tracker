@@ -83,7 +83,7 @@ def test_schema_migrations_are_idempotent_and_non_destructive(tmp_path: Path):
     db.init_schema()
 
     with db.connect() as conn:
-        assert conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 2
+        assert conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 8
         assert conn.execute("SELECT COUNT(*) FROM window_activity").fetchone()[0] == 1
 
 

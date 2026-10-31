@@ -60,7 +60,7 @@ def test_default_service_uses_current_project_and_windows_script(monkeypatch):
 
     service = get_autostart_service()
 
-    assert service.project_dir.name == "pc-time-tracker"
+    assert service.project_dir == Path(__file__).resolve().parent.parent
     assert service.wscript == Path("D:/Windows/System32/wscript.exe")
 
 

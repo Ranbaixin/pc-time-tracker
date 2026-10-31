@@ -68,7 +68,7 @@ def test_session_activity_agent_and_status_contracts(tmp_path, monkeypatch):
     prompt = client.get("/api/v1/agent/prompt").json()["data"]
     assert prompt["scenario"] == "daily_review"
     status = client.get("/api/v1/status").json()["data"]
-    assert status["schema_version"] == 2
+    assert status["schema_version"] == 8
 
 
 def test_classification_rule_lifecycle(tmp_path, monkeypatch):
